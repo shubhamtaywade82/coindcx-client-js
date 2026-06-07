@@ -10,35 +10,38 @@ async function run() {
         console.log('--- Fetching Active Instruments ---');
         const instruments = await client.getActiveInstruments();
         console.log(`Found ${instruments.length} instruments.`);
-        if (instruments.length > 0) {
-            console.log('First instrument:', instruments[0]);
+        const testPair = 'B-BTC_USDT';
+
+        console.log(`\n--- Fetching ${testPair} Candles ---`);
+        const now = Math.floor(Date.now() / 1000);
+        const candles = await client.getFuturesCandles(testPair, now - 3600, now, '1m');
+        console.log(`Received ${candles.length} candles.`);
+        if (candles.length > 0) {
+            console.log('Latest Candle Close:', candles[candles.length - 1].close);
         }
 
-        console.log('\n--- Fetching BTC_USDT Details ---');
-        const details = await client.getInstrumentDetails('B-BTC_USDT');
-        console.log('BTC_USDT Details:', details);
-
-        console.log('\n--- Fetching Spot Order Book ---');
-        const spotOb = await client.getSpotOrderBook('B-BTC_USDT');
-        console.log('Spot Best Bid:', Object.keys(spotOb.bids)[0]);
+        console.log(`\n--- Fetching ${testPair} Order Book ---`);
+        const orderbook = await client.getFuturesOrderBook(testPair);
+        console.log('Orderbook bids count:', orderbook.bids ? Object.keys(orderbook.bids).length : 0);
 
         // WebSocket Example
         console.log('\n--- Connecting to WebSocket ---');
         await client.wsConnect();
         
-        console.log('Subscribing to BTC_USDT 1m candles...');
-        client.wsSubscribeCandles('B-BTC_USDT', '1m');
+        console.log(`Subscribing to ${testPair} 1m candles...`);
+        client.wsSubscribeCandles(testPair, '1m');
 
         client.on('ws:candlestick', (data) => {
-            console.log('New Candle:', data.close, 'at', data.time);
+            console.log('WS Candle Update:', data.close, 'at', new Date(data.openTime).toLocaleTimeString());
         });
 
-        // Let it run for 10 seconds
+        // Let it run for 15 seconds to catch a live update
+        console.log('Waiting for live updates (15s)...');
         setTimeout(() => {
             console.log('Closing WS...');
             client.wsDisconnect();
             process.exit(0);
-        }, 10000);
+        }, 15000);
 
     } catch (error) {
         console.error('Error:', error.message);
