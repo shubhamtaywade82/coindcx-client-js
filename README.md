@@ -16,16 +16,27 @@ npm install socket.io-client@2.4.0 axios
 - **Normalization**: Standardized response formats for candles, order books, and trades.
 - **TypeScript Definitions**: Full type support included.
 
+## Authentication
+
+Create a `.env` file in your project root to securely store your credentials:
+
+```env
+COINDCX_API_KEY=your_api_key_here
+COINDCX_API_SECRET=your_api_secret_here
+```
+
 ## Quick Start
 
 ```javascript
+require('dotenv').config();
 const { CoinDCXFuturesClient } = require('./coindcx-futures-client');
 
 const client = new CoinDCXFuturesClient({
-  apiKey: 'your_api_key',
-  apiSecret: 'your_api_secret',
+  apiKey: process.env.COINDCX_API_KEY,
+  apiSecret: process.env.COINDCX_API_SECRET,
   debug: true
 });
+```
 
 async function main() {
   // REST Example

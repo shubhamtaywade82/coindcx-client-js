@@ -1,7 +1,10 @@
+require('dotenv').config();
 const { CoinDCXFuturesClient } = require('../coindcx-futures-client');
 
-// Initialize client (public endpoints only for this example)
+// Initialize client with credentials from .env
 const client = new CoinDCXFuturesClient({
+    apiKey: process.env.COINDCX_API_KEY,
+    apiSecret: process.env.COINDCX_API_SECRET,
     debug: true
 });
 
@@ -12,12 +15,24 @@ async function run() {
         console.log(`Found ${instruments.length} instruments.`);
         const testPair = 'B-BTC_USDT';
 
-        console.log(`\n--- Fetching ${testPair} Candles ---`);
-        const now = Math.floor(Date.now() / 1000);
-        const candles = await client.getFuturesCandles(testPair, now - 3600, now, '1m');
-        console.log(`Received ${candles.length} candles.`);
-        if (candles.length > 0) {
-            console.log('Latest Candle Close:', candles[candles.length - 1].close);
+        // Check if credentials are provided
+        if (process.env.COINDCX_API_KEY && process.env.COINDCX_API_SECRET) {
+            console.log('\n--- Fetching Account Balances (Authenticated) ---');
+            try {
+                const balances = await client.getBalances();
+                console.log(`Found ${balances.length} balance entries.`);
+                // Filter non-zero balances
+                const nonZero = balances.filter(b => parseFloat(b.balance) > 0);
+                if (nonZero.length > 0) {
+                    console.log('Non-zero balances:', nonZero);
+                } else {
+                    console.log('All balances are zero.');
+                }
+            } catch (err) {
+                console.error('Balance Fetch Error:', err.message);
+            }
+        } else {
+            console.log('\n⚠️ Skipping authenticated tests: COINDCX_API_KEY/SECRET not found in .env');
         }
 
         console.log(`\n--- Fetching ${testPair} Order Book ---`);
@@ -31,20 +46,33 @@ async function run() {
         console.log(`Subscribing to ${testPair} 1m candles...`);
         client.wsSubscribeCandles(testPair, '1m');
 
+        if (process.env.COINDCX_API_KEY && process.env.COINDCX_API_SECRET) {
+            console.log('Subscribing to Private Account Streams...');
+            client.wsSubscribeAccountFutures();
+        }
+
         client.on('ws:candlestick', (data) => {
             console.log('WS Candle Update:', data.close, 'at', new Date(data.openTime).toLocaleTimeString());
         });
 
-        // Let it run for 15 seconds to catch a live update
-        console.log('Waiting for live updates (15s)...');
+        client.on('ws:balance-update', (data) => {
+            console.log('💰 WS Balance Update:', data);
+        });
+
+        client.on('ws:df-order-update', (data) => {
+            console.log('🔔 WS Order Update:', data);
+        });
+
+        // Let it run for 20 seconds to catch updates
+        console.log('Waiting for live updates (20s)...');
         setTimeout(() => {
             console.log('Closing WS...');
             client.wsDisconnect();
             process.exit(0);
-        }, 15000);
+        }, 20000);
 
     } catch (error) {
-        console.error('Error:', error.message);
+        console.error('Main Error:', error.message);
         process.exit(1);
     }
 }
