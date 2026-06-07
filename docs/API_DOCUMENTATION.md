@@ -1173,3 +1173,4035 @@ REST API
 
 The library is now **complete** for your Binance → CoinDCX futures trading architecture.
 
+```
+/**
+ * CoinDCX Futures Socket.IO Client Library
+ * Supports all documented futures WebSocket channels from docs.coindcx.com
+ *
+ * Requirements: socket.io-client@2.4.0 (CoinDCX requires v2.x)
+ *
+ * @example
+ * const client = new CoinDCXSocketClient({ apiKey: 'xxx', apiSecret: 'xxx' });
+ * await client.connect();
+ *
+ * // Public futures channels
+ * client.subscribeCandles('B-BTC_USDT', '1m');
+ * client.subscribeOrderBook('B-BTC_USDT', 50);
+ * client.subscribeTrades('B-BTC_USDT');
+ * client.subscribePrices('B-BTC_USDT');
+ * client.subscribeCurrentPricesFutures();
+ *
+ * // Private futures channels (requires auth)
+ * client.subscribeAccountFutures();
+ */
+
+const io = require('socket.io-client');
+const crypto = require('crypto');
+const EventEmitter = require('events');
+
+class CoinDCXSocketClient extends EventEmitter {
+  /**
+   * @param {Object} options
+   * @param {string} [options.endpoint='wss://stream.coindcx.com'] - Socket endpoint
+   * @param {string} [options.apiKey] - API key for authenticated channels
+   * @param {string} [options.apiSecret] - API secret for authenticated channels
+   * @param {boolean} [options.autoReconnect=true] - Auto reconnect on disconnect
+   * @param {number} [options.reconnectDelay=5000] - Reconnect delay in ms
+   * @param {boolean} [options.debug=false] - Enable debug logging
+   */
+  constructor(options = {}) {
+    super();
+
+    this.endpoint = options.endpoint || 'wss://stream.coindcx.com';
+    this.apiKey = options.apiKey || '';
+    this.apiSecret = options.apiSecret || '';
+    this.autoReconnect = options.autoReconnect !== false;
+    this.reconnectDelay = options.reconnectDelay || 5000;
+    this.debug = options.debug || false;
+
+    this.socket = null;
+    this.connected = false;
+    this.subscribedChannels = new Set();
+    this.pendingSubscriptions = new Set();
+    this.reconnectTimer = null;
+    this.pingInterval = null;
+    this.isReconnecting = false;
+
+    // Event mappings for futures
+    this.futuresEvents = {
+      candles: 'candlestick',
+      orderBookSnapshot: 'depth-snapshot',
+      orderBookUpdate: 'depth-update',
+      trades: 'new-trade',
+      prices: 'price-change',
+      currentPrices: 'currentPrices@futures#update',
+      accountOrder: 'df-order-update',
+      accountPosition: 'df-position-update',
+      accountBalance: 'balance-update',
+    };
+  }
+
+  _log(...args) {
+    if (this.debug) {
+      console.log('[CoinDCX-WS]', ...args);
+    }
+  }
+
+  _error(...args) {
+    console.error('[CoinDCX-WS]', ...args);
+  }
+
+  /**
+   * Generate HMAC-SHA256 signature for authenticated channels
+   * @param {Object} body - Payload to sign
+   * @returns {string} Hex signature
+   */
+  _generateSignature(body) {
+    if (!this.apiSecret) {
+      throw new Error('API secret required for authenticated channels');
+    }
+    const payload = JSON.stringify(body);
+    return crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(payload)
+      .digest('hex');
+  }
+
+  /**
+   * Connect to the CoinDCX Socket.IO stream
+   * @returns {Promise<void>}
+   */
+  async connect() {
+    if (this.socket && this.connected) {
+      this._log('Already connected');
+      return;
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        this.socket = io(this.endpoint, {
+          transports: ['websocket'],
+          reconnection: false, // We handle reconnection manually
+          timeout: 30000,
+        });
+
+        this.socket.on('connect', () => {
+          this.connected = true;
+          this.isReconnecting = false;
+          this._log('Connected:', this.socket.id);
+
+          // Resubscribe to pending channels
+          this._resubscribeAll();
+
+          // Start ping interval (CoinDCX requires ping every ~25s)
+          this._startPing();
+
+          this.emit('connect', { socketId: this.socket.id });
+          resolve();
+        });
+
+        this.socket.on('disconnect', (reason) => {
+          this.connected = false;
+          this._stopPing();
+          this._log('Disconnected:', reason);
+          this.emit('disconnect', { reason });
+
+          if (this.autoReconnect && !this.isReconnecting) {
+            this._scheduleReconnect();
+          }
+        });
+
+        this.socket.on('connect_error', (err) => {
+          this._error('Connection error:', err.message);
+          this.emit('error', { type: 'connect_error', error: err });
+
+          if (!this.connected) {
+            reject(err);
+          }
+        });
+
+        this.socket.on('error', (err) => {
+          this._error('Socket error:', err);
+          this.emit('error', { type: 'socket_error', error: err });
+        });
+
+        // Setup all event listeners
+        this._setupEventListeners();
+
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  /**
+   * Setup all documented event listeners
+   */
+  _setupEventListeners() {
+    // --- PUBLIC FUTURES EVENTS ---
+
+    // Candlestick data
+    this.socket.on(this.futuresEvents.candles, (response) => {
+      this._log('Candlestick:', response.channel || response.i);
+      this.emit('candlestick', this._normalizeCandlestick(response));
+    });
+
+    // Order book snapshot
+    this.socket.on(this.futuresEvents.orderBookSnapshot, (response) => {
+      this._log('Depth Snapshot:', response.channel);
+      this.emit('depth-snapshot', this._normalizeDepth(response));
+    });
+
+    // Order book update
+    this.socket.on(this.futuresEvents.orderBookUpdate, (response) => {
+      this._log('Depth Update:', response.channel);
+      this.emit('depth-update', this._normalizeDepth(response));
+    });
+
+    // New trades
+    this.socket.on(this.futuresEvents.trades, (response) => {
+      this._log('New Trade:', response.s);
+      this.emit('new-trade', this._normalizeTrade(response));
+    });
+
+    // Price change (LTP)
+    this.socket.on(this.futuresEvents.prices, (response) => {
+      this._log('Price Change:', response.p);
+      this.emit('price-change', this._normalizePriceChange(response));
+    });
+
+    // Current prices batch update
+    this.socket.on(this.futuresEvents.currentPrices, (response) => {
+      this._log('Current Prices Update:', Object.keys(response.prices || {}).length, 'pairs');
+      this.emit('currentPrices@futures#update', this._normalizeCurrentPrices(response));
+    });
+
+    // --- PRIVATE FUTURES EVENTS ---
+
+    // Order updates
+    this.socket.on(this.futuresEvents.accountOrder, (response) => {
+      this._log('Account Order Update');
+      this.emit('df-order-update', response.data || response);
+    });
+
+    // Position updates
+    this.socket.on(this.futuresEvents.accountPosition, (response) => {
+      this._log('Account Position Update');
+      this.emit('df-position-update', response.data || response);
+    });
+
+    // Balance updates
+    this.socket.on(this.futuresEvents.accountBalance, (response) => {
+      this._log('Balance Update');
+      this.emit('balance-update', response.data || response);
+    });
+  }
+
+  // ==================== NORMALIZERS ====================
+
+  _normalizeCandlestick(response) {
+    const data = response.data || response;
+    const candle = Array.isArray(data) ? data[0] : data;
+    return {
+      channel: response.channel || response.i,
+      product: response.pr || 'futures',
+      eventTime: response.Ets,
+      interval: response.i,
+      open: parseFloat(candle.open),
+      high: parseFloat(candle.high),
+      low: parseFloat(candle.low),
+      close: parseFloat(candle.close),
+      volume: parseFloat(candle.volume),
+      quoteVolume: parseFloat(candle.quote_volume),
+      openTime: candle.open_time * 1000, // Convert to ms
+      closeTime: candle.close_time * 1000,
+      pair: candle.pair,
+      symbol: candle.symbol,
+      duration: candle.duration,
+      raw: response,
+    };
+  }
+
+  _normalizeDepth(response) {
+    return {
+      timestamp: response.ts,
+      version: response.vs,
+      product: response.pr || 'futures',
+      bids: this._parseDepthLevels(response.bids),
+      asks: this._parseDepthLevels(response.asks),
+      raw: response,
+    };
+  }
+
+  _parseDepthLevels(levels) {
+    if (!levels) return [];
+    // CoinDCX returns { "price": "qty", ... }
+    return Object.entries(levels).map(([price, qty]) => ({
+      price: parseFloat(price),
+      quantity: parseFloat(qty),
+    }));
+  }
+
+  _normalizeTrade(response) {
+    return {
+      timestamp: response.T,
+      receiveTime: response.RT,
+      price: parseFloat(response.p),
+      quantity: parseFloat(response.q),
+      isMaker: response.m === 1,
+      symbol: response.s,
+      product: response.pr === 'f' ? 'futures' : response.pr,
+      raw: response,
+    };
+  }
+
+  _normalizePriceChange(response) {
+    return {
+      timestamp: response.T,
+      price: parseFloat(response.p),
+      product: response.pr === 'f' ? 'futures' : response.pr,
+      raw: response,
+    };
+  }
+
+  _normalizeCurrentPrices(response) {
+    const prices = {};
+    if (response.prices) {
+      for (const [pair, data] of Object.entries(response.prices)) {
+        prices[pair] = {
+          markPrice: data.mp ? parseFloat(data.mp) : undefined,
+          bmST: data.bmST,
+          cmRT: data.cmRT,
+        };
+      }
+    }
+    return {
+      version: response.vs,
+      timestamp: response.ts,
+      product: response.pr || 'futures',
+      pST: response.pST,
+      prices,
+      raw: response,
+    };
+  }
+
+  // ==================== SUBSCRIPTION METHODS ====================
+
+  /**
+   * Subscribe to futures candlestick stream
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {string} interval - '1m', '5m', '15m', '30m', '1h', '4h', '8h', '1d', '3d', '1w', '1M'
+   */
+  subscribeCandles(pair, interval = '1m') {
+    const channel = `${pair}_${interval}-futures`;
+    this._joinChannel(channel);
+  }
+
+  /**
+   * Unsubscribe from futures candlestick stream
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {string} interval - candle interval
+   */
+  unsubscribeCandles(pair, interval = '1m') {
+    const channel = `${pair}_${interval}-futures`;
+    this._leaveChannel(channel);
+  }
+
+  /**
+   * Subscribe to futures order book depth
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} depth - 10, 20, or 50
+   */
+  subscribeOrderBook(pair, depth = 50) {
+    const channel = `${pair}@orderbook@${depth}-futures`;
+    this._joinChannel(channel);
+  }
+
+  /**
+   * Unsubscribe from futures order book
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} depth - 10, 20, or 50
+   */
+  unsubscribeOrderBook(pair, depth = 50) {
+    const channel = `${pair}@orderbook@${depth}-futures`;
+    this._leaveChannel(channel);
+  }
+
+  /**
+   * Subscribe to futures trades stream
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   */
+  subscribeTrades(pair) {
+    const channel = `${pair}@trades-futures`;
+    this._joinChannel(channel);
+  }
+
+  /**
+   * Unsubscribe from futures trades
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   */
+  unsubscribeTrades(pair) {
+    const channel = `${pair}@trades-futures`;
+    this._leaveChannel(channel);
+  }
+
+  /**
+   * Subscribe to futures price change (LTP) stream
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   */
+  subscribePrices(pair) {
+    const channel = `${pair}@prices-futures`;
+    this._joinChannel(channel);
+  }
+
+  /**
+   * Unsubscribe from futures price change
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   */
+  unsubscribePrices(pair) {
+    const channel = `${pair}@prices-futures`;
+    this._leaveChannel(channel);
+  }
+
+  /**
+   * Subscribe to all futures current prices batch update
+   */
+  subscribeCurrentPricesFutures() {
+    this._joinChannel('currentPrices@futures@rt');
+  }
+
+  /**
+   * Unsubscribe from futures current prices
+   */
+  unsubscribeCurrentPricesFutures() {
+    this._leaveChannel('currentPrices@futures@rt');
+  }
+
+  /**
+   * Subscribe to private account futures updates (orders, positions, balances)
+   * Requires apiKey and apiSecret
+   */
+  subscribeAccountFutures() {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('apiKey and apiSecret required for account streams');
+    }
+    const channel = 'coindcx';
+    const body = { channel };
+    const signature = this._generateSignature(body);
+
+    this._joinChannel(channel, { authSignature: signature, apiKey: this.apiKey });
+  }
+
+  /**
+   * Unsubscribe from private account updates
+   */
+  unsubscribeAccountFutures() {
+    this._leaveChannel('coindcx');
+  }
+
+  // ==================== CHANNEL MANAGEMENT ====================
+
+  _joinChannel(channelName, authPayload = null) {
+    this.pendingSubscriptions.add(channelName);
+
+    if (!this.connected) {
+      this._log('Pending subscription (not connected):', channelName);
+      return;
+    }
+
+    const payload = { channelName, ...authPayload };
+    this.socket.emit('join', payload);
+    this.subscribedChannels.add(channelName);
+    this.pendingSubscriptions.delete(channelName);
+    this._log('Joined channel:', channelName);
+  }
+
+  _leaveChannel(channelName) {
+    if (!this.connected) return;
+
+    this.socket.emit('leave', { channelName });
+    this.subscribedChannels.delete(channelName);
+    this.pendingSubscriptions.delete(channelName);
+    this._log('Left channel:', channelName);
+  }
+
+  _resubscribeAll() {
+    // Resubscribe all previously active channels
+    const channels = Array.from(this.subscribedChannels);
+    const pending = Array.from(this.pendingSubscriptions);
+
+    this.subscribedChannels.clear();
+    this.pendingSubscriptions.clear();
+
+    // Re-join all
+    for (const channel of [...channels, ...pending]) {
+      if (channel === 'coindcx') {
+        this.subscribeAccountFutures();
+      } else {
+        this._joinChannel(channel);
+      }
+    }
+  }
+
+  // ==================== PING / HEARTBEAT ====================
+
+  _startPing() {
+    this._stopPing();
+    this.pingInterval = setInterval(() => {
+      if (this.connected && this.socket) {
+        this.socket.emit('ping', { data: 'Ping message' });
+        this._log('Ping sent');
+      }
+    }, 25000);
+  }
+
+  _stopPing() {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  // ==================== RECONNECTION ====================
+
+  _scheduleReconnect() {
+    if (this.isReconnecting) return;
+    this.isReconnecting = true;
+
+    this._log(`Reconnecting in ${this.reconnectDelay}ms...`);
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        await this.connect();
+      } catch (err) {
+        this._error('Reconnect failed:', err.message);
+        this.isReconnecting = false;
+        if (this.autoReconnect) {
+          this._scheduleReconnect();
+        }
+      }
+    }, this.reconnectDelay);
+  }
+
+  // ==================== UTILITY ====================
+
+  /**
+   * Disconnect from the stream
+   */
+  disconnect() {
+    this.autoReconnect = false;
+    this._stopPing();
+
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+
+    this.connected = false;
+    this.subscribedChannels.clear();
+    this.pendingSubscriptions.clear();
+    this._log('Disconnected manually');
+  }
+
+  /**
+   * Get list of currently subscribed channels
+   * @returns {string[]}
+   */
+  getSubscribedChannels() {
+    return Array.from(this.subscribedChannels);
+  }
+
+  /**
+   * Check if connected
+   * @returns {boolean}
+   */
+  isConnected() {
+    return this.connected;
+  }
+
+  /**
+   * Static helper to build futures pair string
+   * @param {string} base - e.g. 'BTC'
+   * @param {string} quote - e.g. 'USDT'
+   * @param {string} ecode - exchange code, default 'B' (Binance)
+   * @returns {string} e.g. 'B-BTC_USDT'
+   */
+  static buildPair(base, quote, ecode = 'B') {
+    return `${ecode}-${base}_${quote}`;
+  }
+
+  /**
+   * Static helper to parse futures pair
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @returns {Object} { ecode, base, quote }
+   */
+  static parsePair(pair) {
+    const match = pair.match(/^([A-Z])-([A-Z0-9]+)_([A-Z0-9]+)$/);
+    if (!match) return null;
+    return { ecode: match[1], base: match[2], quote: match[3] };
+  }
+}
+
+// ==================== EXAMPLE USAGE ====================
+
+async function main() {
+  // Initialize client
+  const client = new CoinDCXSocketClient({
+    // apiKey: 'your_api_key',      // Required for private channels
+    // apiSecret: 'your_api_secret', // Required for private channels
+    debug: true,
+    autoReconnect: true,
+  });
+
+  // Event listeners
+  client.on('connect', (data) => {
+    console.log('✅ Connected:', data.socketId);
+  });
+
+  client.on('disconnect', (data) => {
+    console.log('❌ Disconnected:', data.reason);
+  });
+
+  client.on('error', (data) => {
+    console.error('💥 Error:', data.type, data.error?.message);
+  });
+
+  // Public futures market data
+  client.on('candlestick', (data) => {
+    console.log('📊 Candle:', data.symbol, data.interval,
+      `O:${data.open} H:${data.high} L:${data.low} C:${data.close} V:${data.volume}`);
+  });
+
+  client.on('depth-snapshot', (data) => {
+    console.log('📗 OB Snapshot:', data.bids.length, 'bids,', data.asks.length, 'asks');
+  });
+
+  client.on('depth-update', (data) => {
+    console.log('📘 OB Update:', data.bids.length, 'bids,', data.asks.length, 'asks');
+  });
+
+  client.on('new-trade', (data) => {
+    console.log('💰 Trade:', data.symbol, `@ ${data.price}`, `Qty: ${data.quantity}`,
+      data.isMaker ? '(Maker)' : '(Taker)');
+  });
+
+  client.on('price-change', (data) => {
+    console.log('📈 Price:', data.price, 'Time:', new Date(data.timestamp).toISOString());
+  });
+
+  client.on('currentPrices@futures#update', (data) => {
+    console.log('📋 Batch Prices:', Object.keys(data.prices).length, 'pairs updated');
+  });
+
+  // Private account futures events
+  client.on('df-order-update', (data) => {
+    console.log('🔔 Futures Order Update:', data);
+  });
+
+  client.on('df-position-update', (data) => {
+    console.log('📍 Futures Position Update:', data);
+  });
+
+  client.on('balance-update', (data) => {
+    console.log('💳 Balance Update:', data);
+  });
+
+  // Connect
+  await client.connect();
+
+  // Subscribe to public futures channels
+  const pair = 'B-BTC_USDT';
+
+  client.subscribeCandles(pair, '1m');
+  client.subscribeOrderBook(pair, 50);
+  client.subscribeTrades(pair);
+  client.subscribePrices(pair);
+  client.subscribeCurrentPricesFutures();
+
+  // For private channels (uncomment if you have API credentials):
+  // client.subscribeAccountFutures();
+
+  // Graceful shutdown
+  process.on('SIGINT', () => {
+    console.log('\n🛑 Shutting down...');
+    client.disconnect();
+    process.exit(0);
+  });
+}
+
+// Run if called directly
+if (require.main === module) {
+  main().catch(console.error);
+}
+
+module.exports = { CoinDCXSocketClient };
+```
+```
+/**
+ * CoinDCX Futures Socket.IO Client TypeScript Declarations
+ */
+
+export interface CoinDCXSocketOptions {
+  endpoint?: string;
+  apiKey?: string;
+  apiSecret?: string;
+  autoReconnect?: boolean;
+  reconnectDelay?: number;
+  debug?: boolean;
+}
+
+export interface CandlestickData {
+  channel: string;
+  product: string;
+  eventTime?: number;
+  interval: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  quoteVolume: number;
+  openTime: number;
+  closeTime: number;
+  pair: string;
+  symbol: string;
+  duration: string;
+  raw: any;
+}
+
+export interface DepthLevel {
+  price: number;
+  quantity: number;
+}
+
+export interface DepthData {
+  timestamp: number;
+  version: number;
+  product: string;
+  bids: DepthLevel[];
+  asks: DepthLevel[];
+  raw: any;
+}
+
+export interface TradeData {
+  timestamp: number;
+  receiveTime?: number;
+  price: number;
+  quantity: number;
+  isMaker: boolean;
+  symbol: string;
+  product: string;
+  raw: any;
+}
+
+export interface PriceChangeData {
+  timestamp: number;
+  price: number;
+  product: string;
+  raw: any;
+}
+
+export interface CurrentPricesData {
+  version: number;
+  timestamp: number;
+  product: string;
+  pST?: number;
+  prices: Record<string, {
+    markPrice?: number;
+    bmST?: number;
+    cmRT?: number;
+  }>;
+  raw: any;
+}
+
+export interface ConnectEvent {
+  socketId: string;
+}
+
+export interface DisconnectEvent {
+  reason: string;
+}
+
+export interface ErrorEvent {
+  type: string;
+  error: Error;
+}
+
+export type FuturesInterval = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '8h' | '1d' | '3d' | '1w' | '1M';
+export type OrderBookDepth = 10 | 20 | 50;
+
+export declare class CoinDCXSocketClient extends EventEmitter {
+  constructor(options?: CoinDCXSocketOptions);
+
+  connect(): Promise<void>;
+  disconnect(): void;
+
+  subscribeCandles(pair: string, interval?: FuturesInterval): void;
+  unsubscribeCandles(pair: string, interval?: FuturesInterval): void;
+
+  subscribeOrderBook(pair: string, depth?: OrderBookDepth): void;
+  unsubscribeOrderBook(pair: string, depth?: OrderBookDepth): void;
+
+  subscribeTrades(pair: string): void;
+  unsubscribeTrades(pair: string): void;
+
+  subscribePrices(pair: string): void;
+  unsubscribePrices(pair: string): void;
+
+  subscribeCurrentPricesFutures(): void;
+  unsubscribeCurrentPricesFutures(): void;
+
+  subscribeAccountFutures(): void;
+  unsubscribeAccountFutures(): void;
+
+  getSubscribedChannels(): string[];
+  isConnected(): boolean;
+
+  static buildPair(base: string, quote: string, ecode?: string): string;
+  static parsePair(pair: string): { ecode: string; base: string; quote: string } | null;
+
+  // EventEmitter overloads
+  on(event: 'connect', listener: (data: ConnectEvent) => void): this;
+  on(event: 'disconnect', listener: (data: DisconnectEvent) => void): this;
+  on(event: 'error', listener: (data: ErrorEvent) => void): this;
+  on(event: 'candlestick', listener: (data: CandlestickData) => void): this;
+  on(event: 'depth-snapshot', listener: (data: DepthData) => void): this;
+  on(event: 'depth-update', listener: (data: DepthData) => void): this;
+  on(event: 'new-trade', listener: (data: TradeData) => void): this;
+  on(event: 'price-change', listener: (data: PriceChangeData) => void): this;
+  on(event: 'currentPrices@futures#update', listener: (data: CurrentPricesData) => void): this;
+  on(event: 'df-order-update', listener: (data: any) => void): this;
+  on(event: 'df-position-update', listener: (data: any) => void): this;
+  on(event: 'balance-update', listener: (data: any) => void): this;
+  on(event: string | symbol, listener: (...args: any[]) => void): this;
+
+  emit(event: 'connect', data: ConnectEvent): boolean;
+  emit(event: 'disconnect', data: DisconnectEvent): boolean;
+  emit(event: 'error', data: ErrorEvent): boolean;
+  emit(event: 'candlestick', data: CandlestickData): boolean;
+  emit(event: 'depth-snapshot', data: DepthData): boolean;
+  emit(event: 'depth-update', data: DepthData): boolean;
+  emit(event: 'new-trade', data: TradeData): boolean;
+  emit(event: 'price-change', data: PriceChangeData): boolean;
+  emit(event: 'currentPrices@futures#update', data: CurrentPricesData): boolean;
+  emit(event: 'df-order-update', data: any): boolean;
+  emit(event: 'df-position-update', data: any): boolean;
+  emit(event: 'balance-update', data: any): boolean;
+  emit(event: string | symbol, ...args: any[]): boolean;
+}
+```
+```
+{
+  "name": "coindcx-futures-client",
+  "version": "2.1.0",
+  "description": "Complete CoinDCX Futures Client - REST API + Socket.IO WebSocket with all documented endpoints",
+  "main": "coindcx-futures-client.js",
+  "types": "coindcx-futures-client.d.ts",
+  "scripts": {
+    "start": "node coindcx-futures-client.js",
+    "test": "node -e "const {CoinDCXFuturesClient} = require('./coindcx-futures-client'); console.log('Module loaded OK')""
+  },
+  "keywords": [
+    "coindcx",
+    "futures",
+    "websocket",
+    "socket.io",
+    "rest-api",
+    "crypto",
+    "trading",
+    "api",
+    "derivatives"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "socket.io-client": "2.4.0"
+  },
+  "optionalDependencies": {
+    "axios": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+```
+```
+/**
+ * CoinDCX Futures Complete Client Library
+ * Supports all documented futures WebSocket channels and REST API endpoints
+ *
+ * Requirements: socket.io-client@2.4.0 (CoinDCX requires v2.x)
+ *                 axios or node-fetch for REST calls
+ *
+ * @example
+ * const { CoinDCXFuturesClient } = require('./coindcx-futures-client');
+ *
+ * // Initialize with API credentials for private endpoints
+ * const client = new CoinDCXFuturesClient({
+ *   apiKey: 'your_api_key',
+ *   apiSecret: 'your_api_secret',
+ *   debug: true
+ * });
+ *
+ * // REST API Examples
+ * const instruments = await client.getActiveInstruments('USDT');
+ * const candles = await client.getFuturesCandles('B-BTC_USDT', fromTime, toTime, '1m');
+ * const order = await client.createFuturesOrder({
+ *   pair: 'B-BTC_USDT',
+ *   side: 'buy',
+ *   order_type: 'limit',
+ *   price: 50000,
+ *   total_quantity: 0.01,
+ *   leverage: 10
+ * });
+ *
+ * // WebSocket Examples
+ * await client.wsConnect();
+ * client.wsSubscribeCandles('B-BTC_USDT', '1m');
+ * client.wsSubscribeOrderBook('B-BTC_USDT', 50);
+ * client.wsSubscribeAccountFutures();
+ */
+
+const io = require('socket.io-client');
+const crypto = require('crypto');
+const EventEmitter = require('events');
+
+// Use native fetch if available (Node 18+), otherwise require axios
+let httpClient;
+try {
+  if (globalThis.fetch) {
+    httpClient = 'fetch';
+  } else {
+    httpClient = 'axios';
+    require('axios');
+  }
+} catch (e) {
+  httpClient = 'axios';
+}
+
+class CoinDCXFuturesClient extends EventEmitter {
+  /**
+   * @param {Object} options
+   * @param {string} [options.restBaseUrl='https://api.coindcx.com'] - REST API base URL
+   * @param {string} [options.publicBaseUrl='https://public.coindcx.com'] - Public data base URL
+   * @param {string} [options.wsEndpoint='wss://stream.coindcx.com'] - WebSocket endpoint
+   * @param {string} [options.apiKey] - API key for authenticated endpoints
+   * @param {string} [options.apiSecret] - API secret for authenticated endpoints
+   * @param {boolean} [options.autoReconnect=true] - Auto reconnect WS on disconnect
+   * @param {number} [options.reconnectDelay=5000] - WS reconnect delay in ms
+   * @param {boolean} [options.debug=false] - Enable debug logging
+   * @param {number} [options.timeout=30000] - HTTP request timeout in ms
+   */
+  constructor(options = {}) {
+    super();
+
+    this.restBaseUrl = options.restBaseUrl || 'https://api.coindcx.com';
+    this.publicBaseUrl = options.publicBaseUrl || 'https://public.coindcx.com';
+    this.wsEndpoint = options.wsEndpoint || 'wss://stream.coindcx.com';
+    this.apiKey = options.apiKey || '';
+    this.apiSecret = options.apiSecret || '';
+    this.autoReconnect = options.autoReconnect !== false;
+    this.reconnectDelay = options.reconnectDelay || 5000;
+    this.debug = options.debug || false;
+    this.timeout = options.timeout || 30000;
+
+    // WebSocket state
+    this.socket = null;
+    this.wsConnected = false;
+    this.subscribedChannels = new Set();
+    this.pendingSubscriptions = new Set();
+    this.reconnectTimer = null;
+    this.pingInterval = null;
+    this.isReconnecting = false;
+
+    // Futures event mappings
+    this.futuresEvents = {
+      candles: 'candlestick',
+      orderBookSnapshot: 'depth-snapshot',
+      orderBookUpdate: 'depth-update',
+      trades: 'new-trade',
+      prices: 'price-change',
+      currentPrices: 'currentPrices@futures#update',
+      accountOrder: 'df-order-update',
+      accountPosition: 'df-position-update',
+      accountBalance: 'balance-update',
+    };
+  }
+
+  _log(...args) {
+    if (this.debug) {
+      console.log('[CoinDCX-Futures]', ...args);
+    }
+  }
+
+  _error(...args) {
+    console.error('[CoinDCX-Futures]', ...args);
+  }
+
+  // ==================== AUTHENTICATION HELPERS ====================
+
+  /**
+   * Generate HMAC-SHA256 signature for authenticated requests
+   * @param {Object} body - Payload to sign
+   * @returns {string} Hex signature
+   */
+  _generateSignature(body) {
+    if (!this.apiSecret) {
+      throw new Error('API secret required for authenticated endpoints');
+    }
+    const payload = JSON.stringify(body);
+    return crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(payload)
+      .digest('hex');
+  }
+
+  /**
+   * Build authenticated headers
+   * @param {Object} body - Request body
+   * @returns {Object} Headers object
+   */
+  _buildAuthHeaders(body) {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('apiKey and apiSecret required for authenticated endpoints');
+    }
+    const signature = this._generateSignature(body);
+    return {
+      'Content-Type': 'application/json',
+      'X-AUTH-APIKEY': this.apiKey,
+      'X-AUTH-SIGNATURE': signature,
+    };
+  }
+
+  /**
+   * Add timestamp to body if not present
+   * @param {Object} body
+   * @returns {Object} Body with timestamp
+   */
+  _addTimestamp(body) {
+    if (!body.timestamp) {
+      body.timestamp = Math.floor(Date.now() / 1000); // CoinDCX uses seconds
+    }
+    return body;
+  }
+
+  // ==================== HTTP CLIENT ====================
+
+  async _httpRequest(method, url, body = null, isPublic = false) {
+    const fullUrl = url.startsWith('http') ? url : `${this.restBaseUrl}${url}`;
+
+    let headers = { 'Content-Type': 'application/json' };
+
+    if (!isPublic && body) {
+      body = this._addTimestamp(body);
+      headers = { ...headers, ...this._buildAuthHeaders(body) };
+    }
+
+    if (httpClient === 'fetch') {
+      const response = await fetch(fullUrl, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(this.timeout),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorBody}`);
+      }
+      return await response.json();
+    } else {
+      const axios = require('axios');
+      const response = await axios({
+        method,
+        url: fullUrl,
+        headers,
+        data: body,
+        timeout: this.timeout,
+      });
+      return response.data;
+    }
+  }
+
+  async _get(url, params = {}, isPublic = false) {
+    const queryString = new URLSearchParams(params).toString();
+    const fullUrl = queryString ? `${url}?${queryString}` : url;
+    return this._httpRequest('GET', fullUrl, null, isPublic);
+  }
+
+  async _post(url, body = {}, isPublic = false) {
+    return this._httpRequest('POST', url, body, isPublic);
+  }
+
+  // ==================== PUBLIC FUTURES REST ENDPOINTS ====================
+
+  /**
+   * Get all active futures instruments
+   * @param {string} marginCurrencyShortName - e.g. 'USDT', 'INR'
+   * @returns {Promise<Object[]>} Array of active instruments
+   */
+  async getActiveInstruments(marginCurrencyShortName = 'USDT') {
+    const url = `/exchange/v1/derivatives/futures/data/active_instruments`;
+    const params = { 'margin_currency_short_name[]': marginCurrencyShortName };
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get detailed information for a specific futures instrument
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {string} marginCurrencyShortName - e.g. 'USDT'
+   * @returns {Promise<Object>} Instrument details
+   */
+  async getInstrumentDetails(pair, marginCurrencyShortName = 'USDT') {
+    const url = `/exchange/v1/derivatives/futures/data/instruments`;
+    const params = { pair, margin_currency_short_name: marginCurrencyShortName };
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get futures candlestick data
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} fromTime - Start timestamp in seconds
+   * @param {number} toTime - End timestamp in seconds
+   * @param {string} resolution - '1m', '5m', '15m', '30m', '1h', '4h', '8h', '1D', '3D', '1W', '1M'
+   * @returns {Promise<Object>} { data: Candle[], instrument: string, pair: string }
+   */
+  async getFuturesCandles(pair, fromTime, toTime, resolution = '1m') {
+    const url = `/exchange/v1/derivatives/futures/data/candles`;
+    const params = { pair, from_time: fromTime, to_time: toTime, resolution };
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get futures trade history
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} [limit=50] - Number of trades to fetch
+   * @returns {Promise<Object[]>} Array of trades
+   */
+  async getFuturesTradeHistory(pair, limit = 50) {
+    const url = `/exchange/v1/derivatives/futures/data/trade_history`;
+    const params = { pair, limit };
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get futures order book (L3)
+   * @param {string} instrument - Instrument name (from getActiveInstruments)
+   * @param {number} [depth=50] - Depth levels (10, 20, 50)
+   * @returns {Promise<Object>} { bids: {}, asks: {}, timestamp, version }
+   */
+  async getFuturesOrderBook(instrument, depth = 50) {
+    const url = `${this.publicBaseUrl}/public/market_data/v3/orderbook/${instrument}-futures/${depth}`;
+    return this._get(url, {}, true);
+  }
+
+  /**
+   * Get futures current prices (batch)
+   * @returns {Promise<Object>} Current prices for all futures pairs
+   */
+  async getFuturesCurrentPrices() {
+    const url = `/exchange/v1/derivatives/futures/data/current_prices`;
+    return this._get(url, {}, true);
+  }
+
+  /**
+   * Get funding rate history
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} [limit=100] - Number of records
+   * @returns {Promise<Object[]>}
+   */
+  async getFundingRateHistory(pair, limit = 100) {
+    const url = `/exchange/v1/derivatives/futures/data/funding_rate`;
+    const params = { pair, limit };
+    return this._get(url, params, true);
+  }
+
+
+  // ==================== SPOT MARKET DATA REST ENDPOINTS (Public) ====================
+
+  /**
+   * Get spot candlestick data
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {string} interval - '1m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '1d', '3d', '1w', '1M'
+   * @param {number} [startTime] - Start timestamp in ms
+   * @param {number} [endTime] - End timestamp in ms
+   * @param {number} [limit=500] - Max 1000
+   * @returns {Promise<Object[]>} Array of candle objects
+   */
+  async getSpotCandles(pair, interval = '1m', startTime, endTime, limit = 500) {
+    const url = `${this.publicBaseUrl}/market_data/candles`;
+    const params = { pair, interval };
+    if (startTime) params.startTime = startTime;
+    if (endTime) params.endTime = endTime;
+    if (limit) params.limit = limit;
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get spot trade history
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} [limit=50] - Max 500
+   * @returns {Promise<Object[]>} Array of trades
+   */
+  async getSpotTradeHistory(pair, limit = 50) {
+    const url = `${this.publicBaseUrl}/market_data/trade_history`;
+    const params = { pair, limit };
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get spot order book (L2)
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @returns {Promise<Object>} { bids: {}, asks: {} }
+   */
+  async getSpotOrderBook(pair) {
+    const url = `${this.publicBaseUrl}/market_data/orderbook`;
+    const params = { pair };
+    return this._get(url, params, true);
+  }
+
+  // ==================== AUTHENTICATED FUTURES REST ENDPOINTS ====================
+
+  /**
+   * Create a new futures order
+   * @param {Object} params
+   * @param {string} params.pair - e.g. 'B-BTC_USDT'
+   * @param {string} params.side - 'buy' or 'sell'
+   * @param {string} params.order_type - 'market', 'limit', 'stop_limit', 'stop_market', 'take_profit_limit', 'take_profit_market'
+   * @param {number} params.total_quantity - Order quantity
+   * @param {number} params.leverage - Leverage multiplier
+   * @param {number} [params.price] - Order price (required for limit orders)
+   * @param {number} [params.stop_price] - Trigger price (for stop/take_profit orders)
+   * @param {string} [params.time_in_force] - 'good_till_cancel', 'fill_or_kill', 'immediate_or_cancel'
+   * @param {number} [params.take_profit_price] - Take profit trigger price
+   * @param {number} [params.stop_loss_price] - Stop loss trigger price
+   * @param {boolean} [params.post_only] - Maker-only order
+   * @param {boolean} [params.hidden] - Hidden order
+   * @param {string} [params.client_order_id] - Custom order ID
+   * @param {string} [params.margin_currency_short_name] - 'USDT' or 'INR'
+   * @returns {Promise<Object>} Created order details
+   */
+  async createFuturesOrder(params) {
+    const url = `/exchange/v1/derivatives/futures/orders/create`;
+    const body = {
+      side: params.side,
+      pair: params.pair,
+      order_type: params.order_type,
+      total_quantity: params.total_quantity,
+      leverage: params.leverage,
+      ...(params.price && { price: params.price }),
+      ...(params.stop_price && { stop_price: params.stop_price }),
+      ...(params.time_in_force && { time_in_force: params.time_in_force }),
+      ...(params.take_profit_price && { take_profit_price: params.take_profit_price }),
+      ...(params.stop_loss_price && { stop_loss_price: params.stop_loss_price }),
+      ...(params.post_only !== undefined && { post_only: params.post_only }),
+      ...(params.hidden !== undefined && { hidden: params.hidden }),
+      ...(params.client_order_id && { client_order_id: params.client_order_id }),
+      ...(params.margin_currency_short_name && { margin_currency_short_name: params.margin_currency_short_name }),
+    };
+    return this._post(url, body);
+  }
+
+  /**
+   * List futures orders
+   * @param {Object} filters
+   * @param {string} [filters.side] - 'buy' or 'sell'
+   * @param {string} [filters.status] - 'open', 'partially_filled', 'filled', 'cancelled', 'rejected'
+   * @param {string[]} [filters.margin_currency_short_name] - ['USDT'] or ['INR']
+   * @param {string} [filters.pair] - e.g. 'B-BTC_USDT'
+   * @param {number} [filters.page=1] - Page number
+   * @param {number} [filters.size=10] - Records per page
+   * @returns {Promise<Object>} Paginated orders list
+   */
+  async listFuturesOrders(filters = {}) {
+    const url = `/exchange/v1/derivatives/futures/orders`;
+    const body = {
+      ...(filters.side && { side: filters.side }),
+      ...(filters.status && { status: filters.status }),
+      ...(filters.margin_currency_short_name && { margin_currency_short_name: filters.margin_currency_short_name }),
+      ...(filters.pair && { pair: filters.pair }),
+      ...(filters.page && { page: filters.page }),
+      ...(filters.size && { size: filters.size }),
+    };
+    return this._post(url, body);
+  }
+
+  /**
+   * Get futures order details
+   * @param {string} id - Order ID
+   * @returns {Promise<Object>} Order details
+   */
+  async getFuturesOrder(id) {
+    const url = `/exchange/v1/derivatives/futures/orders/details`;
+    return this._post(url, { id });
+  }
+
+  /**
+   * Cancel a futures order
+   * @param {string} id - Order ID to cancel
+   * @returns {Promise<Object>} Cancellation result
+   */
+  async cancelFuturesOrder(id) {
+    const url = `/exchange/v1/derivatives/futures/orders/cancel`;
+    return this._post(url, { id });
+  }
+
+  /**
+   * Cancel all futures orders for a pair
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {string} [side] - 'buy' or 'sell' (optional)
+   * @returns {Promise<Object>}
+   */
+  async cancelAllFuturesOrders(pair, side) {
+    const url = `/exchange/v1/derivatives/futures/orders/cancel_all`;
+    const body = { pair };
+    if (side) body.side = side;
+    return this._post(url, body);
+  }
+
+  /**
+   * Edit an existing futures order
+   * @param {Object} params
+   * @param {string} params.id - Order ID
+   * @param {number} [params.total_quantity] - New quantity
+   * @param {number} [params.price] - New price
+   * @param {number} [params.take_profit_price] - New TP price
+   * @param {number} [params.stop_loss_price] - New SL price
+   * @returns {Promise<Object>} Updated order
+   */
+  async editFuturesOrder(params) {
+    const url = `/exchange/v1/derivatives/futures/orders/edit`;
+    const body = {
+      id: params.id,
+      ...(params.total_quantity !== undefined && { total_quantity: params.total_quantity }),
+      ...(params.price !== undefined && { price: params.price }),
+      ...(params.take_profit_price !== undefined && { take_profit_price: params.take_profit_price }),
+      ...(params.stop_loss_price !== undefined && { stop_loss_price: params.stop_loss_price }),
+    };
+    return this._post(url, body);
+  }
+
+  /**
+   * Get open futures positions
+   * @param {Object} filters
+   * @param {number} [filters.page=1] - Page number
+   * @param {number} [filters.size=10] - Records per page
+   * @param {string} [filters.pair] - Filter by pair
+   * @param {string} [filters.margin_currency_short_name] - 'USDT' or 'INR'
+   * @returns {Promise<Object>} Paginated positions list
+   */
+  async getFuturesPositions(filters = {}) {
+    const url = `/exchange/v1/derivatives/futures/positions`;
+    const body = {
+      ...(filters.page && { page: filters.page }),
+      ...(filters.size && { size: filters.size }),
+      ...(filters.pair && { pair: filters.pair }),
+      ...(filters.margin_currency_short_name && { margin_currency_short_name: filters.margin_currency_short_name }),
+    };
+    return this._post(url, body);
+  }
+
+  /**
+   * Close a futures position (market close)
+   * @param {string} id - Position ID
+   * @returns {Promise<Object>}
+   */
+  async closeFuturesPosition(id) {
+    const url = `/exchange/v1/derivatives/futures/positions/close`;
+    return this._post(url, { id });
+  }
+
+  /**
+   * Update leverage for a futures pair
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} leverage - New leverage value
+   * @returns {Promise<Object>}
+   */
+  async updateLeverage(pair, leverage) {
+    const url = `/exchange/v1/derivatives/futures/leverage`;
+    return this._post(url, { pair, leverage });
+  }
+
+  /**
+   * Get futures transactions / trade history
+   * @param {Object} filters
+   * @param {string} [filters.pair] - Filter by pair
+   * @param {number} [filters.from_time] - Start timestamp (seconds)
+   * @param {number} [filters.to_time] - End timestamp (seconds)
+   * @param {number} [filters.page=1] - Page number
+   * @param {number} [filters.size=10] - Records per page
+   * @returns {Promise<Object>}
+   */
+  async getFuturesTransactions(filters = {}) {
+    const url = `/exchange/v1/derivatives/futures/transactions`;
+    const body = {
+      ...(filters.pair && { pair: filters.pair }),
+      ...(filters.from_time && { from_time: filters.from_time }),
+      ...(filters.to_time && { to_time: filters.to_time }),
+      ...(filters.page && { page: filters.page }),
+      ...(filters.size && { size: filters.size }),
+    };
+    return this._post(url, body);
+  }
+
+  /**
+   * Add margin to a futures position
+   * @param {string} id - Position ID
+   * @param {number} amount - Amount to add
+   * @returns {Promise<Object>}
+   */
+  async addFuturesMargin(id, amount) {
+    const url = `/exchange/v1/derivatives/futures/positions/add_margin`;
+    return this._post(url, { id, amount });
+  }
+
+  /**
+   * Remove margin from a futures position
+   * @param {string} id - Position ID
+   * @param {number} amount - Amount to remove
+   * @returns {Promise<Object>}
+   */
+  async removeFuturesMargin(id, amount) {
+    const url = `/exchange/v1/derivatives/futures/positions/remove_margin`;
+    return this._post(url, { id, amount });
+  }
+
+  // ==================== SPOT/MARGIN REST ENDPOINTS (Legacy) ====================
+
+  /**
+   * Get all market tickers (spot)
+   * @returns {Promise<Object[]>}
+   */
+  async getTicker() {
+    return this._get('/exchange/ticker', {}, true);
+  }
+
+  /**
+   * Get all markets (spot)
+   * @returns {Promise<string[]>}
+   */
+  async getMarkets() {
+    return this._get('/exchange/v1/markets', {}, true);
+  }
+
+  /**
+   * Get market details (spot)
+   * @returns {Promise<Object[]>}
+   */
+  async getMarketsDetails() {
+    return this._get('/exchange/v1/markets_details', {}, true);
+  }
+
+  /**
+   * Get user balances
+   * @returns {Promise<Object[]>}
+   */
+  async getBalances() {
+    return this._post('/exchange/v1/users/balances', {});
+  }
+
+  /**
+   * Get user info
+   * @returns {Promise<Object>}
+   */
+  async getUserInfo() {
+    return this._post('/exchange/v1/users/info', {});
+  }
+
+  /**
+   * Transfer between wallets (spot <-> futures)
+   * @param {string} sourceWalletType - 'spot' or 'futures'
+   * @param {string} destinationWalletType - 'spot' or 'futures'
+   * @param {string} currencyShortName - e.g. 'USDT'
+   * @param {number} amount - Amount to transfer
+   * @returns {Promise<Object>}
+   */
+  async walletTransfer(sourceWalletType, destinationWalletType, currencyShortName, amount) {
+    return this._post('/exchange/v1/wallets/transfer', {
+      source_wallet_type: sourceWalletType,
+      destination_wallet_type: destinationWalletType,
+      currency_short_name: currencyShortName,
+      amount,
+    });
+  }
+
+  // ==================== SUB-ACCOUNT MANAGEMENT ====================
+
+  /**
+   * Transfer funds between master account and sub-accounts
+   * @param {Object} params
+   * @param {string} params.fromAccountId - Source account ID (main or sub-account)
+   * @param {string} params.toAccountId - Destination account ID (main or sub-account)
+   * @param {string} params.currencyShortName - Asset type e.g. 'USDT', 'BTC'
+   * @param {number} params.amount - Amount to transfer
+   * @returns {Promise<Object>} { status, message, code }
+   *
+   * Supported transfers:
+   * - Main spot wallet → Sub-account spot wallet
+   * - Sub-account spot wallet → Main spot wallet
+   * - Sub-account spot wallet → Another sub-account spot wallet
+   *
+   * Note: Only available for API keys created after 12th August 2024
+   */
+  async subAccountTransfer(params) {
+    const url = `/exchange/v1/wallets/sub_account_transfer`;
+    const body = {
+      from_account_id: params.fromAccountId,
+      to_account_id: params.toAccountId,
+      currency_short_name: params.currencyShortName,
+      amount: params.amount,
+    };
+    return this._post(url, body);
+  }
+
+
+
+  // ==================== WEBSOCKET METHODS ====================
+
+  /**
+   * Connect to the CoinDCX Socket.IO stream
+   * @returns {Promise<void>}
+   */
+  async wsConnect() {
+    if (this.socket && this.wsConnected) {
+      this._log('WS Already connected');
+      return;
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        this.socket = io(this.wsEndpoint, {
+          transports: ['websocket'],
+          reconnection: false,
+          timeout: 30000,
+        });
+
+        this.socket.on('connect', () => {
+          this.wsConnected = true;
+          this.isReconnecting = false;
+          this._log('WS Connected:', this.socket.id);
+          this._wsResubscribeAll();
+          this._wsStartPing();
+          this.emit('ws:connect', { socketId: this.socket.id });
+          resolve();
+        });
+
+        this.socket.on('disconnect', (reason) => {
+          this.wsConnected = false;
+          this._wsStopPing();
+          this._log('WS Disconnected:', reason);
+          this.emit('ws:disconnect', { reason });
+          if (this.autoReconnect && !this.isReconnecting) {
+            this._wsScheduleReconnect();
+          }
+        });
+
+        this.socket.on('connect_error', (err) => {
+          this._error('WS Connection error:', err.message);
+          this.emit('ws:error', { type: 'connect_error', error: err });
+          if (!this.wsConnected) reject(err);
+        });
+
+        this.socket.on('error', (err) => {
+          this._error('WS Socket error:', err);
+          this.emit('ws:error', { type: 'socket_error', error: err });
+        });
+
+        this._setupWsEventListeners();
+
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  _setupWsEventListeners() {
+    // Public futures events
+    this.socket.on(this.futuresEvents.candles, (response) => {
+      this._log('WS Candlestick:', response.channel || response.i);
+      this.emit('ws:candlestick', this._normalizeCandlestick(response));
+    });
+
+    this.socket.on(this.futuresEvents.orderBookSnapshot, (response) => {
+      this._log('WS Depth Snapshot:', response.channel);
+      this.emit('ws:depth-snapshot', this._normalizeDepth(response));
+    });
+
+    this.socket.on(this.futuresEvents.orderBookUpdate, (response) => {
+      this._log('WS Depth Update:', response.channel);
+      this.emit('ws:depth-update', this._normalizeDepth(response));
+    });
+
+    this.socket.on(this.futuresEvents.trades, (response) => {
+      this._log('WS New Trade:', response.s);
+      this.emit('ws:new-trade', this._normalizeTrade(response));
+    });
+
+    this.socket.on(this.futuresEvents.prices, (response) => {
+      this._log('WS Price Change:', response.p);
+      this.emit('ws:price-change', this._normalizePriceChange(response));
+    });
+
+    this.socket.on(this.futuresEvents.currentPrices, (response) => {
+      this._log('WS Current Prices:', Object.keys(response.prices || {}).length, 'pairs');
+      this.emit('ws:currentPrices@futures#update', this._normalizeCurrentPrices(response));
+    });
+
+    // Private futures events
+    this.socket.on(this.futuresEvents.accountOrder, (response) => {
+      this._log('WS Account Order Update');
+      this.emit('ws:df-order-update', response.data || response);
+    });
+
+    this.socket.on(this.futuresEvents.accountPosition, (response) => {
+      this._log('WS Account Position Update');
+      this.emit('ws:df-position-update', response.data || response);
+    });
+
+    this.socket.on(this.futuresEvents.accountBalance, (response) => {
+      this._log('WS Balance Update');
+      this.emit('ws:balance-update', response.data || response);
+    });
+  }
+
+  // WS Normalizers
+  _normalizeCandlestick(response) {
+    const data = response.data || response;
+    const candle = Array.isArray(data) ? data[0] : data;
+    return {
+      channel: response.channel || response.i,
+      product: response.pr || 'futures',
+      eventTime: response.Ets,
+      interval: response.i,
+      open: parseFloat(candle.open),
+      high: parseFloat(candle.high),
+      low: parseFloat(candle.low),
+      close: parseFloat(candle.close),
+      volume: parseFloat(candle.volume),
+      quoteVolume: parseFloat(candle.quote_volume),
+      openTime: candle.open_time * 1000,
+      closeTime: candle.close_time * 1000,
+      pair: candle.pair,
+      symbol: candle.symbol,
+      duration: candle.duration,
+      raw: response,
+    };
+  }
+
+  _normalizeDepth(response) {
+    return {
+      timestamp: response.ts,
+      version: response.vs,
+      product: response.pr || 'futures',
+      bids: this._parseDepthLevels(response.bids),
+      asks: this._parseDepthLevels(response.asks),
+      raw: response,
+    };
+  }
+
+  _parseDepthLevels(levels) {
+    if (!levels) return [];
+    return Object.entries(levels).map(([price, qty]) => ({
+      price: parseFloat(price),
+      quantity: parseFloat(qty),
+    }));
+  }
+
+  _normalizeTrade(response) {
+    return {
+      timestamp: response.T,
+      receiveTime: response.RT,
+      price: parseFloat(response.p),
+      quantity: parseFloat(response.q),
+      isMaker: response.m === 1,
+      symbol: response.s,
+      product: response.pr === 'f' ? 'futures' : response.pr,
+      raw: response,
+    };
+  }
+
+  _normalizePriceChange(response) {
+    return {
+      timestamp: response.T,
+      price: parseFloat(response.p),
+      product: response.pr === 'f' ? 'futures' : response.pr,
+      raw: response,
+    };
+  }
+
+  _normalizeCurrentPrices(response) {
+    const prices = {};
+    if (response.prices) {
+      for (const [pair, data] of Object.entries(response.prices)) {
+        prices[pair] = {
+          markPrice: data.mp ? parseFloat(data.mp) : undefined,
+          bmST: data.bmST,
+          cmRT: data.cmRT,
+        };
+      }
+    }
+    return {
+      version: response.vs,
+      timestamp: response.ts,
+      product: response.pr || 'futures',
+      pST: response.pST,
+      prices,
+      raw: response,
+    };
+  }
+
+  // WS Subscription Methods
+  wsSubscribeCandles(pair, interval = '1m') {
+    this._wsJoinChannel(`${pair}_${interval}-futures`);
+  }
+
+  wsUnsubscribeCandles(pair, interval = '1m') {
+    this._wsLeaveChannel(`${pair}_${interval}-futures`);
+  }
+
+  wsSubscribeOrderBook(pair, depth = 50) {
+    this._wsJoinChannel(`${pair}@orderbook@${depth}-futures`);
+  }
+
+  wsUnsubscribeOrderBook(pair, depth = 50) {
+    this._wsLeaveChannel(`${pair}@orderbook@${depth}-futures`);
+  }
+
+  wsSubscribeTrades(pair) {
+    this._wsJoinChannel(`${pair}@trades-futures`);
+  }
+
+  wsUnsubscribeTrades(pair) {
+    this._wsLeaveChannel(`${pair}@trades-futures`);
+  }
+
+  wsSubscribePrices(pair) {
+    this._wsJoinChannel(`${pair}@prices-futures`);
+  }
+
+  wsUnsubscribePrices(pair) {
+    this._wsLeaveChannel(`${pair}@prices-futures`);
+  }
+
+  wsSubscribeCurrentPricesFutures() {
+    this._wsJoinChannel('currentPrices@futures@rt');
+  }
+
+  wsUnsubscribeCurrentPricesFutures() {
+    this._wsLeaveChannel('currentPrices@futures@rt');
+  }
+
+  wsSubscribeAccountFutures() {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('apiKey and apiSecret required for account streams');
+    }
+    const channel = 'coindcx';
+    const body = { channel };
+    const signature = this._generateSignature(body);
+    this._wsJoinChannel(channel, { authSignature: signature, apiKey: this.apiKey });
+  }
+
+  wsUnsubscribeAccountFutures() {
+    this._wsLeaveChannel('coindcx');
+  }
+
+  // WS Channel Management
+  _wsJoinChannel(channelName, authPayload = null) {
+    this.pendingSubscriptions.add(channelName);
+    if (!this.wsConnected) {
+      this._log('WS Pending subscription:', channelName);
+      return;
+    }
+    const payload = { channelName, ...authPayload };
+    this.socket.emit('join', payload);
+    this.subscribedChannels.add(channelName);
+    this.pendingSubscriptions.delete(channelName);
+    this._log('WS Joined channel:', channelName);
+  }
+
+  _wsLeaveChannel(channelName) {
+    if (!this.wsConnected) return;
+    this.socket.emit('leave', { channelName });
+    this.subscribedChannels.delete(channelName);
+    this.pendingSubscriptions.delete(channelName);
+    this._log('WS Left channel:', channelName);
+  }
+
+  _wsResubscribeAll() {
+    const channels = Array.from(this.subscribedChannels);
+    const pending = Array.from(this.pendingSubscriptions);
+    this.subscribedChannels.clear();
+    this.pendingSubscriptions.clear();
+    for (const channel of [...channels, ...pending]) {
+      if (channel === 'coindcx') {
+        this.wsSubscribeAccountFutures();
+      } else {
+        this._wsJoinChannel(channel);
+      }
+    }
+  }
+
+  _wsStartPing() {
+    this._wsStopPing();
+    this.pingInterval = setInterval(() => {
+      if (this.wsConnected && this.socket) {
+        this.socket.emit('ping', { data: 'Ping message' });
+        this._log('WS Ping sent');
+      }
+    }, 25000);
+  }
+
+  _wsStopPing() {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  _wsScheduleReconnect() {
+    if (this.isReconnecting) return;
+    this.isReconnecting = true;
+    this._log(`WS Reconnecting in ${this.reconnectDelay}ms...`);
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        await this.wsConnect();
+      } catch (err) {
+        this._error('WS Reconnect failed:', err.message);
+        this.isReconnecting = false;
+        if (this.autoReconnect) this._wsScheduleReconnect();
+      }
+    }, this.reconnectDelay);
+  }
+
+  /**
+   * Disconnect WebSocket
+   */
+  wsDisconnect() {
+    this.autoReconnect = false;
+    this._wsStopPing();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+    this.wsConnected = false;
+    this.subscribedChannels.clear();
+    this.pendingSubscriptions.clear();
+    this._log('WS Disconnected manually');
+  }
+
+  /**
+   * Get list of currently subscribed WS channels
+   * @returns {string[]}
+   */
+  wsGetSubscribedChannels() {
+    return Array.from(this.subscribedChannels);
+  }
+
+  /**
+   * Check if WS is connected
+   * @returns {boolean}
+   */
+  wsIsConnected() {
+    return this.wsConnected;
+  }
+
+  // ==================== STATIC HELPERS ====================
+
+  /**
+   * Build futures pair string
+   * @param {string} base - e.g. 'BTC'
+   * @param {string} quote - e.g. 'USDT'
+   * @param {string} ecode - exchange code, default 'B'
+   * @returns {string} e.g. 'B-BTC_USDT'
+   */
+  static buildPair(base, quote, ecode = 'B') {
+    return `${ecode}-${base}_${quote}`;
+  }
+
+  /**
+   * Parse futures pair
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @returns {Object|null} { ecode, base, quote }
+   */
+  static parsePair(pair) {
+    const match = pair.match(/^([A-Z])-([A-Z0-9]+)_([A-Z0-9]+)$/);
+    if (!match) return null;
+    return { ecode: match[1], base: match[2], quote: match[3] };
+  }
+
+  /**
+   * Convert milliseconds to seconds (for CoinDCX timestamps)
+   * @param {number} ms
+   * @returns {number}
+   */
+  static msToSeconds(ms) {
+    return Math.floor(ms / 1000);
+  }
+
+  /**
+   * Convert seconds to milliseconds
+   * @param {number} seconds
+   * @returns {number}
+   */
+  static secondsToMs(seconds) {
+    return seconds * 1000;
+  }
+
+  /**
+   * Get current timestamp in seconds (CoinDCX format)
+   * @returns {number}
+   */
+  static nowSeconds() {
+    return Math.floor(Date.now() / 1000);
+  }
+}
+
+// ==================== EXAMPLE USAGE ====================
+
+async function main() {
+  const client = new CoinDCXFuturesClient({
+    apiKey: process.env.COINDCX_API_KEY || 'your_key',
+    apiSecret: process.env.COINDCX_API_SECRET || 'your_secret',
+    debug: true,
+    autoReconnect: true,
+  });
+
+  // ========== REST API EXAMPLES ==========
+
+  try {
+    // 1. Get active instruments
+    const instruments = await client.getActiveInstruments('USDT');
+    console.log('\n✅ Active Instruments:', instruments.length);
+
+    // 2. Get instrument details
+    const details = await client.getInstrumentDetails('B-BTC_USDT', 'USDT');
+    console.log('\n✅ BTC/USDT Details:', details?.instrument?.max_leverage_long, 'x max leverage');
+
+    // 3. Get futures candles
+    const toTime = CoinDCXFuturesClient.nowSeconds();
+    const fromTime = toTime - 3600; // 1 hour ago
+    const candles = await client.getFuturesCandles('B-BTC_USDT', fromTime, toTime, '1m');
+    console.log('\n✅ Candles:', candles.data?.length, 'bars');
+
+    // 4. Get futures trade history
+    const trades = await client.getFuturesTradeHistory('B-BTC_USDT', 5);
+    console.log('\n✅ Recent Trades:', trades.length);
+
+    // 5. Get order book
+    const ob = await client.getFuturesOrderBook('BTCUSDT', 10);
+    console.log('\n✅ Order Book:', Object.keys(ob.bids || {}).length, 'bid levels');
+
+    // 6. Get balances
+    const balances = await client.getBalances();
+    console.log('\n✅ Balances:', balances.filter(b => parseFloat(b.balance) > 0).map(b => `${b.currency}: ${b.balance}`));
+
+    // 7. Create a futures order (uncomment with real credentials)
+    // const order = await client.createFuturesOrder({
+    //   pair: 'B-BTC_USDT',
+    //   side: 'buy',
+    //   order_type: 'limit',
+    //   price: 50000,
+    //   total_quantity: 0.001,
+    //   leverage: 5,
+    //   time_in_force: 'good_till_cancel',
+    //   take_profit_price: 55000,
+    //   stop_loss_price: 48000,
+    // });
+    // console.log('\n✅ Order Created:', order.id);
+
+    // 8. List open orders
+    // const orders = await client.listFuturesOrders({ status: 'open', margin_currency_short_name: ['USDT'] });
+    // console.log('\n✅ Open Orders:', orders.length);
+
+    // 9. Get positions
+    // const positions = await client.getFuturesPositions({ size: 10 });
+    // console.log('\n✅ Positions:', positions.length);
+
+  } catch (err) {
+    console.error('\n❌ REST Error:', err.message);
+  }
+
+  // ========== WEBSOCKET EXAMPLES ==========
+
+  client.on('ws:connect', (data) => {
+    console.log('\n🔌 WS Connected:', data.socketId);
+  });
+
+  client.on('ws:disconnect', (data) => {
+    console.log('\n🔌 WS Disconnected:', data.reason);
+  });
+
+  client.on('ws:candlestick', (data) => {
+    console.log('\n📊 Candle:', data.pair, data.interval,
+      `O:${data.open} H:${data.high} L:${data.low} C:${data.close} V:${data.volume}`);
+  });
+
+  client.on('ws:depth-snapshot', (data) => {
+    console.log('\n📗 OB Snapshot:', data.bids.length, 'bids,', data.asks.length, 'asks');
+  });
+
+  client.on('ws:depth-update', (data) => {
+    console.log('\n📘 OB Update:', data.bids.length, 'bids,', data.asks.length, 'asks');
+  });
+
+  client.on('ws:new-trade', (data) => {
+    console.log('\n💰 Trade:', data.symbol, `@ ${data.price}`, `Qty: ${data.quantity}`,
+      data.isMaker ? '(Maker)' : '(Taker)');
+  });
+
+  client.on('ws:price-change', (data) => {
+    console.log('\n📈 Price:', data.price, 'Time:', new Date(data.timestamp).toISOString());
+  });
+
+  client.on('ws:currentPrices@futures#update', (data) => {
+    console.log('\n📋 Batch Prices:', Object.keys(data.prices).length, 'pairs updated');
+  });
+
+  client.on('ws:df-order-update', (data) => {
+    console.log('\n🔔 Futures Order Update:', data);
+  });
+
+  client.on('ws:df-position-update', (data) => {
+    console.log('\n📍 Futures Position Update:', data);
+  });
+
+  client.on('ws:balance-update', (data) => {
+    console.log('\n💳 Balance Update:', data);
+  });
+
+  // Connect and subscribe
+  await client.wsConnect();
+
+  const pair = 'B-BTC_USDT';
+  client.wsSubscribeCandles(pair, '1m');
+  client.wsSubscribeOrderBook(pair, 50);
+  client.wsSubscribeTrades(pair);
+  client.wsSubscribePrices(pair);
+  client.wsSubscribeCurrentPricesFutures();
+
+  // Private account stream (requires auth)
+  // client.wsSubscribeAccountFutures();
+
+  // Graceful shutdown
+  process.on('SIGINT', () => {
+    console.log('\n🛑 Shutting down...');
+    client.wsDisconnect();
+    process.exit(0);
+  });
+}
+
+// Run if called directly
+if (require.main === module) {
+  main().catch(console.error);
+}
+
+module.exports = { CoinDCXFuturesClient };
+```
+```
+/**
+ * CoinDCX Futures Complete Client TypeScript Declarations
+ * REST API + Socket.IO WebSocket
+ */
+
+export interface CoinDCXFuturesOptions {
+  restBaseUrl?: string;
+  publicBaseUrl?: string;
+  wsEndpoint?: string;
+  apiKey?: string;
+  apiSecret?: string;
+  autoReconnect?: boolean;
+  reconnectDelay?: number;
+  debug?: boolean;
+  timeout?: number;
+}
+
+// ==================== REST API TYPES ====================
+
+export interface ActiveInstrument {
+  pair: string;
+  instrument: string;
+  status: string;
+  max_leverage_long: number;
+  max_leverage_short: number;
+  min_quantity: number;
+  max_quantity: number;
+  step: number;
+  tick_size: number;
+  maker_fee: number;
+  taker_fee: number;
+  [key: string]: any;
+}
+
+export interface InstrumentDetails {
+  instrument: ActiveInstrument;
+  [key: string]: any;
+}
+
+export interface FuturesCandle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  quote_volume: number;
+  open_time: number;
+  close_time: number;
+  pair: string;
+  symbol: string;
+  duration: string;
+}
+
+
+export interface SpotCandle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  time: number;
+}
+
+export interface SpotTrade {
+  p: number;
+  q: number;
+  s: string;
+  T: number;
+  m: boolean;
+}
+
+export interface SpotOrderBook {
+  bids: Record<string, string>;
+  asks: Record<string, string>;
+}
+
+export interface FuturesCandlesResponse {
+  data: FuturesCandle[];
+  instrument: string;
+  pair: string;
+}
+
+export interface FuturesTrade {
+  price: number;
+  quantity: number;
+  is_maker: boolean;
+  timestamp: number;
+  [key: string]: any;
+}
+
+export interface FuturesOrderBook {
+  bids: Record<string, string>;
+  asks: Record<string, string>;
+  timestamp: number;
+  version: number;
+}
+
+export interface CreateFuturesOrderParams {
+  pair: string;
+  side: 'buy' | 'sell';
+  order_type: 'market' | 'limit' | 'stop_limit' | 'stop_market' | 'take_profit_limit' | 'take_profit_market';
+  total_quantity: number;
+  leverage: number;
+  price?: number;
+  stop_price?: number;
+  time_in_force?: 'good_till_cancel' | 'fill_or_kill' | 'immediate_or_cancel';
+  take_profit_price?: number;
+  stop_loss_price?: number;
+  post_only?: boolean;
+  hidden?: boolean;
+  client_order_id?: string;
+  margin_currency_short_name?: string;
+}
+
+export interface FuturesOrder {
+  id: string;
+  pair: string;
+  side: string;
+  order_type: string;
+  status: string;
+  total_quantity: number;
+  remaining_quantity: number;
+  price: number;
+  leverage: number;
+  created_at: string;
+  updated_at: string;
+  [key: string]: any;
+}
+
+export interface ListFuturesOrdersFilters {
+  side?: 'buy' | 'sell';
+  status?: 'open' | 'partially_filled' | 'filled' | 'cancelled' | 'rejected';
+  margin_currency_short_name?: string[];
+  pair?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface FuturesPosition {
+  id: string;
+  pair: string;
+  side: string;
+  quantity: number;
+  entry_price: number;
+  leverage: number;
+  pnl: number;
+  margin: number;
+  status: string;
+  [key: string]: any;
+}
+
+
+export interface SubAccountTransferParams {
+  fromAccountId: string;
+  toAccountId: string;
+  currencyShortName: string;
+  amount: number;
+}
+
+export interface SubAccountTransferResult {
+  status: string;
+  message: string | number;
+  code: number;
+}
+
+export interface WalletTransferParams {
+  sourceWalletType: 'spot' | 'futures';
+  destinationWalletType: 'spot' | 'futures';
+  currencyShortName: string;
+  amount: number;
+}
+
+export interface Balance {
+  currency: string;
+  balance: string;
+  locked_balance: string;
+}
+
+export interface UserInfo {
+  coindcx_id: string;
+  first_name: string;
+  last_name: string;
+  mobile_number: string;
+  email: string;
+}
+
+// ==================== WEBSOCKET TYPES ====================
+
+export interface CandlestickData {
+  channel: string;
+  product: string;
+  eventTime?: number;
+  interval: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  quoteVolume: number;
+  openTime: number;
+  closeTime: number;
+  pair: string;
+  symbol: string;
+  duration: string;
+  raw: any;
+}
+
+export interface DepthLevel {
+  price: number;
+  quantity: number;
+}
+
+export interface DepthData {
+  timestamp: number;
+  version: number;
+  product: string;
+  bids: DepthLevel[];
+  asks: DepthLevel[];
+  raw: any;
+}
+
+export interface TradeData {
+  timestamp: number;
+  receiveTime?: number;
+  price: number;
+  quantity: number;
+  isMaker: boolean;
+  symbol: string;
+  product: string;
+  raw: any;
+}
+
+export interface PriceChangeData {
+  timestamp: number;
+  price: number;
+  product: string;
+  raw: any;
+}
+
+export interface CurrentPricesData {
+  version: number;
+  timestamp: number;
+  product: string;
+  pST?: number;
+  prices: Record<string, {
+    markPrice?: number;
+    bmST?: number;
+    cmRT?: number;
+  }>;
+  raw: any;
+}
+
+export interface WSConnectEvent {
+  socketId: string;
+}
+
+export interface WSDisconnectEvent {
+  reason: string;
+}
+
+export interface WSErrorEvent {
+  type: string;
+  error: Error;
+}
+
+export type FuturesInterval = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '8h' | '1D' | '3D' | '1W' | '1M';
+export type OrderBookDepth = 10 | 20 | 50;
+export type OrderSide = 'buy' | 'sell';
+export type OrderStatus = 'open' | 'partially_filled' | 'filled' | 'cancelled' | 'rejected';
+
+// ==================== MAIN CLASS ====================
+
+export declare class CoinDCXFuturesClient extends EventEmitter {
+  constructor(options?: CoinDCXFuturesOptions);
+
+  // ---------- REST: Public Futures Endpoints ----------
+
+  getActiveInstruments(marginCurrencyShortName?: string): Promise<ActiveInstrument[]>;
+  getInstrumentDetails(pair: string, marginCurrencyShortName?: string): Promise<InstrumentDetails>;
+  getFuturesCandles(pair: string, fromTime: number, toTime: number, resolution?: string): Promise<FuturesCandlesResponse>;
+  getFuturesTradeHistory(pair: string, limit?: number): Promise<FuturesTrade[]>;
+  getFuturesOrderBook(instrument: string, depth?: number): Promise<FuturesOrderBook>;
+  getFuturesCurrentPrices(): Promise<Record<string, any>>;
+  getFundingRateHistory(pair: string, limit?: number): Promise<any[]>;
+
+  // ---------- REST: Spot Market Data (Public) ----------
+
+  getSpotCandles(pair: string, interval?: string, startTime?: number, endTime?: number, limit?: number): Promise<SpotCandle[]>;
+  getSpotTradeHistory(pair: string, limit?: number): Promise<SpotTrade[]>;
+  getSpotOrderBook(pair: string): Promise<SpotOrderBook>;
+
+  // ---------- REST: Authenticated Futures Endpoints ----------
+
+  createFuturesOrder(params: CreateFuturesOrderParams): Promise<FuturesOrder>;
+  listFuturesOrders(filters?: ListFuturesOrdersFilters): Promise<{ orders: FuturesOrder[]; pagination: any }>;
+  getFuturesOrder(id: string): Promise<FuturesOrder>;
+  cancelFuturesOrder(id: string): Promise<{ status: string; message: string }>;
+  cancelAllFuturesOrders(pair: string, side?: OrderSide): Promise<{ status: string; message: string }>;
+  editFuturesOrder(params: { id: string; total_quantity?: number; price?: number; take_profit_price?: number; stop_loss_price?: number }): Promise<FuturesOrder>;
+  getFuturesPositions(filters?: { page?: number; size?: number; pair?: string; margin_currency_short_name?: string }): Promise<{ positions: FuturesPosition[]; pagination: any }>;
+  closeFuturesPosition(id: string): Promise<{ status: string; message: string }>;
+  updateLeverage(pair: string, leverage: number): Promise<{ status: string; message: string }>;
+  getFuturesTransactions(filters?: { pair?: string; from_time?: number; to_time?: number; page?: number; size?: number }): Promise<any>;
+  addFuturesMargin(id: string, amount: number): Promise<{ status: string; message: string }>;
+  removeFuturesMargin(id: string, amount: number): Promise<{ status: string; message: string }>;
+
+  // ---------- REST: Legacy Spot/Margin Endpoints ----------
+
+  getTicker(): Promise<any[]>;
+  getMarkets(): Promise<string[]>;
+  getMarketsDetails(): Promise<any[]>;
+  getBalances(): Promise<Balance[]>;
+  getUserInfo(): Promise<UserInfo>;
+  walletTransfer(sourceWalletType: string, destinationWalletType: string, currencyShortName: string, amount: number): Promise<{ status: string; message: string; code: number }>;
+  subAccountTransfer(params: SubAccountTransferParams): Promise<SubAccountTransferResult>;
+
+
+  // ---------- WebSocket Methods ----------
+
+  wsConnect(): Promise<void>;
+  wsDisconnect(): void;
+  wsIsConnected(): boolean;
+  wsGetSubscribedChannels(): string[];
+
+  wsSubscribeCandles(pair: string, interval?: FuturesInterval): void;
+  wsUnsubscribeCandles(pair: string, interval?: FuturesInterval): void;
+  wsSubscribeOrderBook(pair: string, depth?: OrderBookDepth): void;
+  wsUnsubscribeOrderBook(pair: string, depth?: OrderBookDepth): void;
+  wsSubscribeTrades(pair: string): void;
+  wsUnsubscribeTrades(pair: string): void;
+  wsSubscribePrices(pair: string): void;
+  wsUnsubscribePrices(pair: string): void;
+  wsSubscribeCurrentPricesFutures(): void;
+  wsUnsubscribeCurrentPricesFutures(): void;
+  wsSubscribeAccountFutures(): void;
+  wsUnsubscribeAccountFutures(): void;
+
+  // ---------- Static Helpers ----------
+
+  static buildPair(base: string, quote: string, ecode?: string): string;
+  static parsePair(pair: string): { ecode: string; base: string; quote: string } | null;
+  static msToSeconds(ms: number): number;
+  static secondsToMs(seconds: number): number;
+  static nowSeconds(): number;
+
+  // ---------- EventEmitter Overloads ----------
+
+  on(event: 'ws:connect', listener: (data: WSConnectEvent) => void): this;
+  on(event: 'ws:disconnect', listener: (data: WSDisconnectEvent) => void): this;
+  on(event: 'ws:error', listener: (data: WSErrorEvent) => void): this;
+  on(event: 'ws:candlestick', listener: (data: CandlestickData) => void): this;
+  on(event: 'ws:depth-snapshot', listener: (data: DepthData) => void): this;
+  on(event: 'ws:depth-update', listener: (data: DepthData) => void): this;
+  on(event: 'ws:new-trade', listener: (data: TradeData) => void): this;
+  on(event: 'ws:price-change', listener: (data: PriceChangeData) => void): this;
+  on(event: 'ws:currentPrices@futures#update', listener: (data: CurrentPricesData) => void): this;
+  on(event: 'ws:df-order-update', listener: (data: any) => void): this;
+  on(event: 'ws:df-position-update', listener: (data: any) => void): this;
+  on(event: 'ws:balance-update', listener: (data: any) => void): this;
+  on(event: string | symbol, listener: (...args: any[]) => void): this;
+
+  emit(event: 'ws:connect', data: WSConnectEvent): boolean;
+  emit(event: 'ws:disconnect', data: WSDisconnectEvent): boolean;
+  emit(event: 'ws:error', data: WSErrorEvent): boolean;
+  emit(event: 'ws:candlestick', data: CandlestickData): boolean;
+  emit(event: 'ws:depth-snapshot', data: DepthData): boolean;
+  emit(event: 'ws:depth-update', data: DepthData): boolean;
+  emit(event: 'ws:new-trade', data: TradeData): boolean;
+  emit(event: 'ws:price-change', data: PriceChangeData): boolean;
+  emit(event: 'ws:currentPrices@futures#update', data: CurrentPricesData): boolean;
+  emit(event: 'ws:df-order-update', data: any): boolean;
+  emit(event: 'ws:df-position-update', data: any): boolean;
+  emit(event: 'ws:balance-update', data: any): boolean;
+  emit(event: string | symbol, ...args: any[]): boolean;
+}
+```
+```
+{
+  "name": "coindcx-futures-client",
+  "version": "2.1.0",
+  "description": "Complete CoinDCX Futures Client - REST API + Socket.IO WebSocket with all documented endpoints",
+  "main": "coindcx-futures-client.js",
+  "types": "coindcx-futures-client.d.ts",
+  "scripts": {
+    "start": "node coindcx-futures-client.js",
+    "test": "node -e "const {CoinDCXFuturesClient} = require('./coindcx-futures-client'); console.log('Module loaded OK')""
+  },
+  "keywords": [
+    "coindcx",
+    "futures",
+    "websocket",
+    "socket.io",
+    "rest-api",
+    "crypto",
+    "trading",
+    "api",
+    "derivatives"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "socket.io-client": "2.4.0"
+  },
+  "optionalDependencies": {
+    "axios": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+```
+```
+/**
+ * CoinDCX Futures Complete Client Library
+ * Supports all documented futures WebSocket channels and REST API endpoints
+ *
+ * Requirements: socket.io-client@2.4.0 (CoinDCX requires v2.x)
+ *                 axios or node-fetch for REST calls
+ *
+ * @example
+ * const { CoinDCXFuturesClient } = require('./coindcx-futures-client');
+ *
+ * // Initialize with API credentials for private endpoints
+ * const client = new CoinDCXFuturesClient({
+ *   apiKey: 'your_api_key',
+ *   apiSecret: 'your_api_secret',
+ *   debug: true
+ * });
+ *
+ * // REST API Examples
+ * const instruments = await client.getActiveInstruments('USDT');
+ * const candles = await client.getFuturesCandles('B-BTC_USDT', fromTime, toTime, '1m');
+ * const order = await client.createFuturesOrder({
+ *   pair: 'B-BTC_USDT',
+ *   side: 'buy',
+ *   order_type: 'limit',
+ *   price: 50000,
+ *   total_quantity: 0.01,
+ *   leverage: 10
+ * });
+ *
+ * // WebSocket Examples
+ * await client.wsConnect();
+ * client.wsSubscribeCandles('B-BTC_USDT', '1m');
+ * client.wsSubscribeOrderBook('B-BTC_USDT', 50);
+ * client.wsSubscribeAccountFutures();
+ */
+
+const io = require('socket.io-client');
+const crypto = require('crypto');
+const EventEmitter = require('events');
+
+// Use native fetch if available (Node 18+), otherwise require axios
+let httpClient;
+try {
+  if (globalThis.fetch) {
+    httpClient = 'fetch';
+  } else {
+    httpClient = 'axios';
+    require('axios');
+  }
+} catch (e) {
+  httpClient = 'axios';
+}
+
+class CoinDCXFuturesClient extends EventEmitter {
+  /**
+   * @param {Object} options
+   * @param {string} [options.restBaseUrl='https://api.coindcx.com'] - REST API base URL
+   * @param {string} [options.publicBaseUrl='https://public.coindcx.com'] - Public data base URL
+   * @param {string} [options.wsEndpoint='wss://stream.coindcx.com'] - WebSocket endpoint
+   * @param {string} [options.apiKey] - API key for authenticated endpoints
+   * @param {string} [options.apiSecret] - API secret for authenticated endpoints
+   * @param {boolean} [options.autoReconnect=true] - Auto reconnect WS on disconnect
+   * @param {number} [options.reconnectDelay=5000] - WS reconnect delay in ms
+   * @param {boolean} [options.debug=false] - Enable debug logging
+   * @param {number} [options.timeout=30000] - HTTP request timeout in ms
+   */
+  constructor(options = {}) {
+    super();
+
+    this.restBaseUrl = options.restBaseUrl || 'https://api.coindcx.com';
+    this.publicBaseUrl = options.publicBaseUrl || 'https://public.coindcx.com';
+    this.wsEndpoint = options.wsEndpoint || 'wss://stream.coindcx.com';
+    this.apiKey = options.apiKey || '';
+    this.apiSecret = options.apiSecret || '';
+    this.autoReconnect = options.autoReconnect !== false;
+    this.reconnectDelay = options.reconnectDelay || 5000;
+    this.debug = options.debug || false;
+    this.timeout = options.timeout || 30000;
+
+    // WebSocket state
+    this.socket = null;
+    this.wsConnected = false;
+    this.subscribedChannels = new Set();
+    this.pendingSubscriptions = new Set();
+    this.reconnectTimer = null;
+    this.pingInterval = null;
+    this.isReconnecting = false;
+
+    // Futures event mappings
+    this.futuresEvents = {
+      candles: 'candlestick',
+      orderBookSnapshot: 'depth-snapshot',
+      orderBookUpdate: 'depth-update',
+      trades: 'new-trade',
+      prices: 'price-change',
+      currentPrices: 'currentPrices@futures#update',
+      accountOrder: 'df-order-update',
+      accountPosition: 'df-position-update',
+      accountBalance: 'balance-update',
+    };
+  }
+
+  _log(...args) {
+    if (this.debug) {
+      console.log('[CoinDCX-Futures]', ...args);
+    }
+  }
+
+  _error(...args) {
+    console.error('[CoinDCX-Futures]', ...args);
+  }
+
+  // ==================== AUTHENTICATION HELPERS ====================
+
+  /**
+   * Generate HMAC-SHA256 signature for authenticated requests
+   * @param {Object} body - Payload to sign
+   * @returns {string} Hex signature
+   */
+  _generateSignature(body) {
+    if (!this.apiSecret) {
+      throw new Error('API secret required for authenticated endpoints');
+    }
+    const payload = JSON.stringify(body);
+    return crypto
+      .createHmac('sha256', this.apiSecret)
+      .update(payload)
+      .digest('hex');
+  }
+
+  /**
+   * Build authenticated headers
+   * @param {Object} body - Request body
+   * @returns {Object} Headers object
+   */
+  _buildAuthHeaders(body) {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('apiKey and apiSecret required for authenticated endpoints');
+    }
+    const signature = this._generateSignature(body);
+    return {
+      'Content-Type': 'application/json',
+      'X-AUTH-APIKEY': this.apiKey,
+      'X-AUTH-SIGNATURE': signature,
+    };
+  }
+
+  /**
+   * Add timestamp to body if not present
+   * @param {Object} body
+   * @returns {Object} Body with timestamp
+   */
+  _addTimestamp(body) {
+    if (!body.timestamp) {
+      body.timestamp = Math.floor(Date.now() / 1000); // CoinDCX uses seconds
+    }
+    return body;
+  }
+
+  // ==================== HTTP CLIENT ====================
+
+  async _httpRequest(method, url, body = null, isPublic = false) {
+    const fullUrl = url.startsWith('http') ? url : `${this.restBaseUrl}${url}`;
+
+    let headers = { 'Content-Type': 'application/json' };
+
+    if (!isPublic && body) {
+      body = this._addTimestamp(body);
+      headers = { ...headers, ...this._buildAuthHeaders(body) };
+    }
+
+    if (httpClient === 'fetch') {
+      const response = await fetch(fullUrl, {
+        method,
+        headers,
+        body: body ? JSON.stringify(body) : undefined,
+        signal: AbortSignal.timeout(this.timeout),
+      });
+
+      if (!response.ok) {
+        const errorBody = await response.text();
+        throw new Error(`HTTP ${response.status}: ${errorBody}`);
+      }
+      return await response.json();
+    } else {
+      const axios = require('axios');
+      const response = await axios({
+        method,
+        url: fullUrl,
+        headers,
+        data: body,
+        timeout: this.timeout,
+      });
+      return response.data;
+    }
+  }
+
+  async _get(url, params = {}, isPublic = false) {
+    const queryString = new URLSearchParams(params).toString();
+    const fullUrl = queryString ? `${url}?${queryString}` : url;
+    return this._httpRequest('GET', fullUrl, null, isPublic);
+  }
+
+  async _post(url, body = {}, isPublic = false) {
+    return this._httpRequest('POST', url, body, isPublic);
+  }
+
+  // ==================== PUBLIC FUTURES REST ENDPOINTS ====================
+
+  /**
+   * Get all active futures instruments
+   * @param {string} marginCurrencyShortName - e.g. 'USDT', 'INR'
+   * @returns {Promise<Object[]>} Array of active instruments
+   */
+  async getActiveInstruments(marginCurrencyShortName = 'USDT') {
+    const url = `/exchange/v1/derivatives/futures/data/active_instruments`;
+    const params = { 'margin_currency_short_name[]': marginCurrencyShortName };
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get detailed information for a specific futures instrument
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {string} marginCurrencyShortName - e.g. 'USDT'
+   * @returns {Promise<Object>} Instrument details
+   */
+  async getInstrumentDetails(pair, marginCurrencyShortName = 'USDT') {
+    const url = `/exchange/v1/derivatives/futures/data/instruments`;
+    const params = { pair, margin_currency_short_name: marginCurrencyShortName };
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get futures candlestick data
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} fromTime - Start timestamp in seconds
+   * @param {number} toTime - End timestamp in seconds
+   * @param {string} resolution - '1m', '5m', '15m', '30m', '1h', '4h', '8h', '1D', '3D', '1W', '1M'
+   * @returns {Promise<Object>} { data: Candle[], instrument: string, pair: string }
+   */
+  async getFuturesCandles(pair, fromTime, toTime, resolution = '1m') {
+    const url = `/exchange/v1/derivatives/futures/data/candles`;
+    const params = { pair, from_time: fromTime, to_time: toTime, resolution };
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get futures trade history
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} [limit=50] - Number of trades to fetch
+   * @returns {Promise<Object[]>} Array of trades
+   */
+  async getFuturesTradeHistory(pair, limit = 50) {
+    const url = `/exchange/v1/derivatives/futures/data/trade_history`;
+    const params = { pair, limit };
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get futures order book (L3)
+   * @param {string} instrument - Instrument name (from getActiveInstruments)
+   * @param {number} [depth=50] - Depth levels (10, 20, 50)
+   * @returns {Promise<Object>} { bids: {}, asks: {}, timestamp, version }
+   */
+  async getFuturesOrderBook(instrument, depth = 50) {
+    const url = `${this.publicBaseUrl}/public/market_data/v3/orderbook/${instrument}-futures/${depth}`;
+    return this._get(url, {}, true);
+  }
+
+  /**
+   * Get futures current prices (batch)
+   * @returns {Promise<Object>} Current prices for all futures pairs
+   */
+  async getFuturesCurrentPrices() {
+    const url = `/exchange/v1/derivatives/futures/data/current_prices`;
+    return this._get(url, {}, true);
+  }
+
+  /**
+   * Get funding rate history
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} [limit=100] - Number of records
+   * @returns {Promise<Object[]>}
+   */
+  async getFundingRateHistory(pair, limit = 100) {
+    const url = `/exchange/v1/derivatives/futures/data/funding_rate`;
+    const params = { pair, limit };
+    return this._get(url, params, true);
+  }
+
+
+  // ==================== SPOT MARKET DATA REST ENDPOINTS (Public) ====================
+
+  /**
+   * Get spot candlestick data
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {string} interval - '1m', '5m', '15m', '30m', '1h', '2h', '4h', '6h', '8h', '1d', '3d', '1w', '1M'
+   * @param {number} [startTime] - Start timestamp in ms
+   * @param {number} [endTime] - End timestamp in ms
+   * @param {number} [limit=500] - Max 1000
+   * @returns {Promise<Object[]>} Array of candle objects
+   */
+  async getSpotCandles(pair, interval = '1m', startTime, endTime, limit = 500) {
+    const url = `${this.publicBaseUrl}/market_data/candles`;
+    const params = { pair, interval };
+    if (startTime) params.startTime = startTime;
+    if (endTime) params.endTime = endTime;
+    if (limit) params.limit = limit;
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get spot trade history
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} [limit=50] - Max 500
+   * @returns {Promise<Object[]>} Array of trades
+   */
+  async getSpotTradeHistory(pair, limit = 50) {
+    const url = `${this.publicBaseUrl}/market_data/trade_history`;
+    const params = { pair, limit };
+    return this._get(url, params, true);
+  }
+
+  /**
+   * Get spot order book (L2)
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @returns {Promise<Object>} { bids: {}, asks: {} }
+   */
+  async getSpotOrderBook(pair) {
+    const url = `${this.publicBaseUrl}/market_data/orderbook`;
+    const params = { pair };
+    return this._get(url, params, true);
+  }
+
+  // ==================== AUTHENTICATED FUTURES REST ENDPOINTS ====================
+
+  /**
+   * Create a new futures order
+   * @param {Object} params
+   * @param {string} params.pair - e.g. 'B-BTC_USDT'
+   * @param {string} params.side - 'buy' or 'sell'
+   * @param {string} params.order_type - 'market', 'limit', 'stop_limit', 'stop_market', 'take_profit_limit', 'take_profit_market'
+   * @param {number} params.total_quantity - Order quantity
+   * @param {number} params.leverage - Leverage multiplier
+   * @param {number} [params.price] - Order price (required for limit orders)
+   * @param {number} [params.stop_price] - Trigger price (for stop/take_profit orders)
+   * @param {string} [params.time_in_force] - 'good_till_cancel', 'fill_or_kill', 'immediate_or_cancel'
+   * @param {number} [params.take_profit_price] - Take profit trigger price
+   * @param {number} [params.stop_loss_price] - Stop loss trigger price
+   * @param {boolean} [params.post_only] - Maker-only order
+   * @param {boolean} [params.hidden] - Hidden order
+   * @param {string} [params.client_order_id] - Custom order ID
+   * @param {string} [params.margin_currency_short_name] - 'USDT' or 'INR'
+   * @returns {Promise<Object>} Created order details
+   */
+  async createFuturesOrder(params) {
+    const url = `/exchange/v1/derivatives/futures/orders/create`;
+    const body = {
+      side: params.side,
+      pair: params.pair,
+      order_type: params.order_type,
+      total_quantity: params.total_quantity,
+      leverage: params.leverage,
+      ...(params.price && { price: params.price }),
+      ...(params.stop_price && { stop_price: params.stop_price }),
+      ...(params.time_in_force && { time_in_force: params.time_in_force }),
+      ...(params.take_profit_price && { take_profit_price: params.take_profit_price }),
+      ...(params.stop_loss_price && { stop_loss_price: params.stop_loss_price }),
+      ...(params.post_only !== undefined && { post_only: params.post_only }),
+      ...(params.hidden !== undefined && { hidden: params.hidden }),
+      ...(params.client_order_id && { client_order_id: params.client_order_id }),
+      ...(params.margin_currency_short_name && { margin_currency_short_name: params.margin_currency_short_name }),
+    };
+    return this._post(url, body);
+  }
+
+  /**
+   * List futures orders
+   * @param {Object} filters
+   * @param {string} [filters.side] - 'buy' or 'sell'
+   * @param {string} [filters.status] - 'open', 'partially_filled', 'filled', 'cancelled', 'rejected'
+   * @param {string[]} [filters.margin_currency_short_name] - ['USDT'] or ['INR']
+   * @param {string} [filters.pair] - e.g. 'B-BTC_USDT'
+   * @param {number} [filters.page=1] - Page number
+   * @param {number} [filters.size=10] - Records per page
+   * @returns {Promise<Object>} Paginated orders list
+   */
+  async listFuturesOrders(filters = {}) {
+    const url = `/exchange/v1/derivatives/futures/orders`;
+    const body = {
+      ...(filters.side && { side: filters.side }),
+      ...(filters.status && { status: filters.status }),
+      ...(filters.margin_currency_short_name && { margin_currency_short_name: filters.margin_currency_short_name }),
+      ...(filters.pair && { pair: filters.pair }),
+      ...(filters.page && { page: filters.page }),
+      ...(filters.size && { size: filters.size }),
+    };
+    return this._post(url, body);
+  }
+
+  /**
+   * Get futures order details
+   * @param {string} id - Order ID
+   * @returns {Promise<Object>} Order details
+   */
+  async getFuturesOrder(id) {
+    const url = `/exchange/v1/derivatives/futures/orders/details`;
+    return this._post(url, { id });
+  }
+
+  /**
+   * Cancel a futures order
+   * @param {string} id - Order ID to cancel
+   * @returns {Promise<Object>} Cancellation result
+   */
+  async cancelFuturesOrder(id) {
+    const url = `/exchange/v1/derivatives/futures/orders/cancel`;
+    return this._post(url, { id });
+  }
+
+  /**
+   * Cancel all futures orders for a pair
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {string} [side] - 'buy' or 'sell' (optional)
+   * @returns {Promise<Object>}
+   */
+  async cancelAllFuturesOrders(pair, side) {
+    const url = `/exchange/v1/derivatives/futures/orders/cancel_all`;
+    const body = { pair };
+    if (side) body.side = side;
+    return this._post(url, body);
+  }
+
+  /**
+   * Edit an existing futures order
+   * @param {Object} params
+   * @param {string} params.id - Order ID
+   * @param {number} [params.total_quantity] - New quantity
+   * @param {number} [params.price] - New price
+   * @param {number} [params.take_profit_price] - New TP price
+   * @param {number} [params.stop_loss_price] - New SL price
+   * @returns {Promise<Object>} Updated order
+   */
+  async editFuturesOrder(params) {
+    const url = `/exchange/v1/derivatives/futures/orders/edit`;
+    const body = {
+      id: params.id,
+      ...(params.total_quantity !== undefined && { total_quantity: params.total_quantity }),
+      ...(params.price !== undefined && { price: params.price }),
+      ...(params.take_profit_price !== undefined && { take_profit_price: params.take_profit_price }),
+      ...(params.stop_loss_price !== undefined && { stop_loss_price: params.stop_loss_price }),
+    };
+    return this._post(url, body);
+  }
+
+  /**
+   * Get open futures positions
+   * @param {Object} filters
+   * @param {number} [filters.page=1] - Page number
+   * @param {number} [filters.size=10] - Records per page
+   * @param {string} [filters.pair] - Filter by pair
+   * @param {string} [filters.margin_currency_short_name] - 'USDT' or 'INR'
+   * @returns {Promise<Object>} Paginated positions list
+   */
+  async getFuturesPositions(filters = {}) {
+    const url = `/exchange/v1/derivatives/futures/positions`;
+    const body = {
+      ...(filters.page && { page: filters.page }),
+      ...(filters.size && { size: filters.size }),
+      ...(filters.pair && { pair: filters.pair }),
+      ...(filters.margin_currency_short_name && { margin_currency_short_name: filters.margin_currency_short_name }),
+    };
+    return this._post(url, body);
+  }
+
+  /**
+   * Close a futures position (market close)
+   * @param {string} id - Position ID
+   * @returns {Promise<Object>}
+   */
+  async closeFuturesPosition(id) {
+    const url = `/exchange/v1/derivatives/futures/positions/close`;
+    return this._post(url, { id });
+  }
+
+  /**
+   * Update leverage for a futures pair
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @param {number} leverage - New leverage value
+   * @returns {Promise<Object>}
+   */
+  async updateLeverage(pair, leverage) {
+    const url = `/exchange/v1/derivatives/futures/leverage`;
+    return this._post(url, { pair, leverage });
+  }
+
+  /**
+   * Get futures transactions / trade history
+   * @param {Object} filters
+   * @param {string} [filters.pair] - Filter by pair
+   * @param {number} [filters.from_time] - Start timestamp (seconds)
+   * @param {number} [filters.to_time] - End timestamp (seconds)
+   * @param {number} [filters.page=1] - Page number
+   * @param {number} [filters.size=10] - Records per page
+   * @returns {Promise<Object>}
+   */
+  async getFuturesTransactions(filters = {}) {
+    const url = `/exchange/v1/derivatives/futures/transactions`;
+    const body = {
+      ...(filters.pair && { pair: filters.pair }),
+      ...(filters.from_time && { from_time: filters.from_time }),
+      ...(filters.to_time && { to_time: filters.to_time }),
+      ...(filters.page && { page: filters.page }),
+      ...(filters.size && { size: filters.size }),
+    };
+    return this._post(url, body);
+  }
+
+  /**
+   * Add margin to a futures position
+   * @param {string} id - Position ID
+   * @param {number} amount - Amount to add
+   * @returns {Promise<Object>}
+   */
+  async addFuturesMargin(id, amount) {
+    const url = `/exchange/v1/derivatives/futures/positions/add_margin`;
+    return this._post(url, { id, amount });
+  }
+
+  /**
+   * Remove margin from a futures position
+   * @param {string} id - Position ID
+   * @param {number} amount - Amount to remove
+   * @returns {Promise<Object>}
+   */
+  async removeFuturesMargin(id, amount) {
+    const url = `/exchange/v1/derivatives/futures/positions/remove_margin`;
+    return this._post(url, { id, amount });
+  }
+
+  // ==================== SPOT/MARGIN REST ENDPOINTS (Legacy) ====================
+
+  /**
+   * Get all market tickers (spot)
+   * @returns {Promise<Object[]>}
+   */
+  async getTicker() {
+    return this._get('/exchange/ticker', {}, true);
+  }
+
+  /**
+   * Get all markets (spot)
+   * @returns {Promise<string[]>}
+   */
+  async getMarkets() {
+    return this._get('/exchange/v1/markets', {}, true);
+  }
+
+  /**
+   * Get market details (spot)
+   * @returns {Promise<Object[]>}
+   */
+  async getMarketsDetails() {
+    return this._get('/exchange/v1/markets_details', {}, true);
+  }
+
+  /**
+   * Get user balances
+   * @returns {Promise<Object[]>}
+   */
+  async getBalances() {
+    return this._post('/exchange/v1/users/balances', {});
+  }
+
+  /**
+   * Get user info
+   * @returns {Promise<Object>}
+   */
+  async getUserInfo() {
+    return this._post('/exchange/v1/users/info', {});
+  }
+
+  /**
+   * Transfer between wallets (spot <-> futures)
+   * @param {string} sourceWalletType - 'spot' or 'futures'
+   * @param {string} destinationWalletType - 'spot' or 'futures'
+   * @param {string} currencyShortName - e.g. 'USDT'
+   * @param {number} amount - Amount to transfer
+   * @returns {Promise<Object>}
+   */
+  async walletTransfer(sourceWalletType, destinationWalletType, currencyShortName, amount) {
+    return this._post('/exchange/v1/wallets/transfer', {
+      source_wallet_type: sourceWalletType,
+      destination_wallet_type: destinationWalletType,
+      currency_short_name: currencyShortName,
+      amount,
+    });
+  }
+
+  // ==================== SUB-ACCOUNT MANAGEMENT ====================
+
+  /**
+   * Transfer funds between master account and sub-accounts
+   * @param {Object} params
+   * @param {string} params.fromAccountId - Source account ID (main or sub-account)
+   * @param {string} params.toAccountId - Destination account ID (main or sub-account)
+   * @param {string} params.currencyShortName - Asset type e.g. 'USDT', 'BTC'
+   * @param {number} params.amount - Amount to transfer
+   * @returns {Promise<Object>} { status, message, code }
+   *
+   * Supported transfers:
+   * - Main spot wallet → Sub-account spot wallet
+   * - Sub-account spot wallet → Main spot wallet
+   * - Sub-account spot wallet → Another sub-account spot wallet
+   *
+   * Note: Only available for API keys created after 12th August 2024
+   */
+  async subAccountTransfer(params) {
+    const url = `/exchange/v1/wallets/sub_account_transfer`;
+    const body = {
+      from_account_id: params.fromAccountId,
+      to_account_id: params.toAccountId,
+      currency_short_name: params.currencyShortName,
+      amount: params.amount,
+    };
+    return this._post(url, body);
+  }
+
+
+
+  // ==================== WEBSOCKET METHODS ====================
+
+  /**
+   * Connect to the CoinDCX Socket.IO stream
+   * @returns {Promise<void>}
+   */
+  async wsConnect() {
+    if (this.socket && this.wsConnected) {
+      this._log('WS Already connected');
+      return;
+    }
+
+    return new Promise((resolve, reject) => {
+      try {
+        this.socket = io(this.wsEndpoint, {
+          transports: ['websocket'],
+          reconnection: false,
+          timeout: 30000,
+        });
+
+        this.socket.on('connect', () => {
+          this.wsConnected = true;
+          this.isReconnecting = false;
+          this._log('WS Connected:', this.socket.id);
+          this._wsResubscribeAll();
+          this._wsStartPing();
+          this.emit('ws:connect', { socketId: this.socket.id });
+          resolve();
+        });
+
+        this.socket.on('disconnect', (reason) => {
+          this.wsConnected = false;
+          this._wsStopPing();
+          this._log('WS Disconnected:', reason);
+          this.emit('ws:disconnect', { reason });
+          if (this.autoReconnect && !this.isReconnecting) {
+            this._wsScheduleReconnect();
+          }
+        });
+
+        this.socket.on('connect_error', (err) => {
+          this._error('WS Connection error:', err.message);
+          this.emit('ws:error', { type: 'connect_error', error: err });
+          if (!this.wsConnected) reject(err);
+        });
+
+        this.socket.on('error', (err) => {
+          this._error('WS Socket error:', err);
+          this.emit('ws:error', { type: 'socket_error', error: err });
+        });
+
+        this._setupWsEventListeners();
+
+      } catch (err) {
+        reject(err);
+      }
+    });
+  }
+
+  _setupWsEventListeners() {
+    // Public futures events
+    this.socket.on(this.futuresEvents.candles, (response) => {
+      this._log('WS Candlestick:', response.channel || response.i);
+      this.emit('ws:candlestick', this._normalizeCandlestick(response));
+    });
+
+    this.socket.on(this.futuresEvents.orderBookSnapshot, (response) => {
+      this._log('WS Depth Snapshot:', response.channel);
+      this.emit('ws:depth-snapshot', this._normalizeDepth(response));
+    });
+
+    this.socket.on(this.futuresEvents.orderBookUpdate, (response) => {
+      this._log('WS Depth Update:', response.channel);
+      this.emit('ws:depth-update', this._normalizeDepth(response));
+    });
+
+    this.socket.on(this.futuresEvents.trades, (response) => {
+      this._log('WS New Trade:', response.s);
+      this.emit('ws:new-trade', this._normalizeTrade(response));
+    });
+
+    this.socket.on(this.futuresEvents.prices, (response) => {
+      this._log('WS Price Change:', response.p);
+      this.emit('ws:price-change', this._normalizePriceChange(response));
+    });
+
+    this.socket.on(this.futuresEvents.currentPrices, (response) => {
+      this._log('WS Current Prices:', Object.keys(response.prices || {}).length, 'pairs');
+      this.emit('ws:currentPrices@futures#update', this._normalizeCurrentPrices(response));
+    });
+
+    // Private futures events
+    this.socket.on(this.futuresEvents.accountOrder, (response) => {
+      this._log('WS Account Order Update');
+      this.emit('ws:df-order-update', response.data || response);
+    });
+
+    this.socket.on(this.futuresEvents.accountPosition, (response) => {
+      this._log('WS Account Position Update');
+      this.emit('ws:df-position-update', response.data || response);
+    });
+
+    this.socket.on(this.futuresEvents.accountBalance, (response) => {
+      this._log('WS Balance Update');
+      this.emit('ws:balance-update', response.data || response);
+    });
+  }
+
+  // WS Normalizers
+  _normalizeCandlestick(response) {
+    const data = response.data || response;
+    const candle = Array.isArray(data) ? data[0] : data;
+    return {
+      channel: response.channel || response.i,
+      product: response.pr || 'futures',
+      eventTime: response.Ets,
+      interval: response.i,
+      open: parseFloat(candle.open),
+      high: parseFloat(candle.high),
+      low: parseFloat(candle.low),
+      close: parseFloat(candle.close),
+      volume: parseFloat(candle.volume),
+      quoteVolume: parseFloat(candle.quote_volume),
+      openTime: candle.open_time * 1000,
+      closeTime: candle.close_time * 1000,
+      pair: candle.pair,
+      symbol: candle.symbol,
+      duration: candle.duration,
+      raw: response,
+    };
+  }
+
+  _normalizeDepth(response) {
+    return {
+      timestamp: response.ts,
+      version: response.vs,
+      product: response.pr || 'futures',
+      bids: this._parseDepthLevels(response.bids),
+      asks: this._parseDepthLevels(response.asks),
+      raw: response,
+    };
+  }
+
+  _parseDepthLevels(levels) {
+    if (!levels) return [];
+    return Object.entries(levels).map(([price, qty]) => ({
+      price: parseFloat(price),
+      quantity: parseFloat(qty),
+    }));
+  }
+
+  _normalizeTrade(response) {
+    return {
+      timestamp: response.T,
+      receiveTime: response.RT,
+      price: parseFloat(response.p),
+      quantity: parseFloat(response.q),
+      isMaker: response.m === 1,
+      symbol: response.s,
+      product: response.pr === 'f' ? 'futures' : response.pr,
+      raw: response,
+    };
+  }
+
+  _normalizePriceChange(response) {
+    return {
+      timestamp: response.T,
+      price: parseFloat(response.p),
+      product: response.pr === 'f' ? 'futures' : response.pr,
+      raw: response,
+    };
+  }
+
+  _normalizeCurrentPrices(response) {
+    const prices = {};
+    if (response.prices) {
+      for (const [pair, data] of Object.entries(response.prices)) {
+        prices[pair] = {
+          markPrice: data.mp ? parseFloat(data.mp) : undefined,
+          bmST: data.bmST,
+          cmRT: data.cmRT,
+        };
+      }
+    }
+    return {
+      version: response.vs,
+      timestamp: response.ts,
+      product: response.pr || 'futures',
+      pST: response.pST,
+      prices,
+      raw: response,
+    };
+  }
+
+  // WS Subscription Methods
+  wsSubscribeCandles(pair, interval = '1m') {
+    this._wsJoinChannel(`${pair}_${interval}-futures`);
+  }
+
+  wsUnsubscribeCandles(pair, interval = '1m') {
+    this._wsLeaveChannel(`${pair}_${interval}-futures`);
+  }
+
+  wsSubscribeOrderBook(pair, depth = 50) {
+    this._wsJoinChannel(`${pair}@orderbook@${depth}-futures`);
+  }
+
+  wsUnsubscribeOrderBook(pair, depth = 50) {
+    this._wsLeaveChannel(`${pair}@orderbook@${depth}-futures`);
+  }
+
+  wsSubscribeTrades(pair) {
+    this._wsJoinChannel(`${pair}@trades-futures`);
+  }
+
+  wsUnsubscribeTrades(pair) {
+    this._wsLeaveChannel(`${pair}@trades-futures`);
+  }
+
+  wsSubscribePrices(pair) {
+    this._wsJoinChannel(`${pair}@prices-futures`);
+  }
+
+  wsUnsubscribePrices(pair) {
+    this._wsLeaveChannel(`${pair}@prices-futures`);
+  }
+
+  wsSubscribeCurrentPricesFutures() {
+    this._wsJoinChannel('currentPrices@futures@rt');
+  }
+
+  wsUnsubscribeCurrentPricesFutures() {
+    this._wsLeaveChannel('currentPrices@futures@rt');
+  }
+
+  wsSubscribeAccountFutures() {
+    if (!this.apiKey || !this.apiSecret) {
+      throw new Error('apiKey and apiSecret required for account streams');
+    }
+    const channel = 'coindcx';
+    const body = { channel };
+    const signature = this._generateSignature(body);
+    this._wsJoinChannel(channel, { authSignature: signature, apiKey: this.apiKey });
+  }
+
+  wsUnsubscribeAccountFutures() {
+    this._wsLeaveChannel('coindcx');
+  }
+
+  // WS Channel Management
+  _wsJoinChannel(channelName, authPayload = null) {
+    this.pendingSubscriptions.add(channelName);
+    if (!this.wsConnected) {
+      this._log('WS Pending subscription:', channelName);
+      return;
+    }
+    const payload = { channelName, ...authPayload };
+    this.socket.emit('join', payload);
+    this.subscribedChannels.add(channelName);
+    this.pendingSubscriptions.delete(channelName);
+    this._log('WS Joined channel:', channelName);
+  }
+
+  _wsLeaveChannel(channelName) {
+    if (!this.wsConnected) return;
+    this.socket.emit('leave', { channelName });
+    this.subscribedChannels.delete(channelName);
+    this.pendingSubscriptions.delete(channelName);
+    this._log('WS Left channel:', channelName);
+  }
+
+  _wsResubscribeAll() {
+    const channels = Array.from(this.subscribedChannels);
+    const pending = Array.from(this.pendingSubscriptions);
+    this.subscribedChannels.clear();
+    this.pendingSubscriptions.clear();
+    for (const channel of [...channels, ...pending]) {
+      if (channel === 'coindcx') {
+        this.wsSubscribeAccountFutures();
+      } else {
+        this._wsJoinChannel(channel);
+      }
+    }
+  }
+
+  _wsStartPing() {
+    this._wsStopPing();
+    this.pingInterval = setInterval(() => {
+      if (this.wsConnected && this.socket) {
+        this.socket.emit('ping', { data: 'Ping message' });
+        this._log('WS Ping sent');
+      }
+    }, 25000);
+  }
+
+  _wsStopPing() {
+    if (this.pingInterval) {
+      clearInterval(this.pingInterval);
+      this.pingInterval = null;
+    }
+  }
+
+  _wsScheduleReconnect() {
+    if (this.isReconnecting) return;
+    this.isReconnecting = true;
+    this._log(`WS Reconnecting in ${this.reconnectDelay}ms...`);
+    this.reconnectTimer = setTimeout(async () => {
+      try {
+        await this.wsConnect();
+      } catch (err) {
+        this._error('WS Reconnect failed:', err.message);
+        this.isReconnecting = false;
+        if (this.autoReconnect) this._wsScheduleReconnect();
+      }
+    }, this.reconnectDelay);
+  }
+
+  /**
+   * Disconnect WebSocket
+   */
+  wsDisconnect() {
+    this.autoReconnect = false;
+    this._wsStopPing();
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+    if (this.socket) {
+      this.socket.disconnect();
+      this.socket = null;
+    }
+    this.wsConnected = false;
+    this.subscribedChannels.clear();
+    this.pendingSubscriptions.clear();
+    this._log('WS Disconnected manually');
+  }
+
+  /**
+   * Get list of currently subscribed WS channels
+   * @returns {string[]}
+   */
+  wsGetSubscribedChannels() {
+    return Array.from(this.subscribedChannels);
+  }
+
+  /**
+   * Check if WS is connected
+   * @returns {boolean}
+   */
+  wsIsConnected() {
+    return this.wsConnected;
+  }
+
+  // ==================== STATIC HELPERS ====================
+
+  /**
+   * Build futures pair string
+   * @param {string} base - e.g. 'BTC'
+   * @param {string} quote - e.g. 'USDT'
+   * @param {string} ecode - exchange code, default 'B'
+   * @returns {string} e.g. 'B-BTC_USDT'
+   */
+  static buildPair(base, quote, ecode = 'B') {
+    return `${ecode}-${base}_${quote}`;
+  }
+
+  /**
+   * Parse futures pair
+   * @param {string} pair - e.g. 'B-BTC_USDT'
+   * @returns {Object|null} { ecode, base, quote }
+   */
+  static parsePair(pair) {
+    const match = pair.match(/^([A-Z])-([A-Z0-9]+)_([A-Z0-9]+)$/);
+    if (!match) return null;
+    return { ecode: match[1], base: match[2], quote: match[3] };
+  }
+
+  /**
+   * Convert milliseconds to seconds (for CoinDCX timestamps)
+   * @param {number} ms
+   * @returns {number}
+   */
+  static msToSeconds(ms) {
+    return Math.floor(ms / 1000);
+  }
+
+  /**
+   * Convert seconds to milliseconds
+   * @param {number} seconds
+   * @returns {number}
+   */
+  static secondsToMs(seconds) {
+    return seconds * 1000;
+  }
+
+  /**
+   * Get current timestamp in seconds (CoinDCX format)
+   * @returns {number}
+   */
+  static nowSeconds() {
+    return Math.floor(Date.now() / 1000);
+  }
+}
+
+// ==================== EXAMPLE USAGE ====================
+
+async function main() {
+  const client = new CoinDCXFuturesClient({
+    apiKey: process.env.COINDCX_API_KEY || 'your_key',
+    apiSecret: process.env.COINDCX_API_SECRET || 'your_secret',
+    debug: true,
+    autoReconnect: true,
+  });
+
+  // ========== REST API EXAMPLES ==========
+
+  try {
+    // 1. Get active instruments
+    const instruments = await client.getActiveInstruments('USDT');
+    console.log('\n✅ Active Instruments:', instruments.length);
+
+    // 2. Get instrument details
+    const details = await client.getInstrumentDetails('B-BTC_USDT', 'USDT');
+    console.log('\n✅ BTC/USDT Details:', details?.instrument?.max_leverage_long, 'x max leverage');
+
+    // 3. Get futures candles
+    const toTime = CoinDCXFuturesClient.nowSeconds();
+    const fromTime = toTime - 3600; // 1 hour ago
+    const candles = await client.getFuturesCandles('B-BTC_USDT', fromTime, toTime, '1m');
+    console.log('\n✅ Candles:', candles.data?.length, 'bars');
+
+    // 4. Get futures trade history
+    const trades = await client.getFuturesTradeHistory('B-BTC_USDT', 5);
+    console.log('\n✅ Recent Trades:', trades.length);
+
+    // 5. Get order book
+    const ob = await client.getFuturesOrderBook('BTCUSDT', 10);
+    console.log('\n✅ Order Book:', Object.keys(ob.bids || {}).length, 'bid levels');
+
+    // 6. Get balances
+    const balances = await client.getBalances();
+    console.log('\n✅ Balances:', balances.filter(b => parseFloat(b.balance) > 0).map(b => `${b.currency}: ${b.balance}`));
+
+    // 7. Create a futures order (uncomment with real credentials)
+    // const order = await client.createFuturesOrder({
+    //   pair: 'B-BTC_USDT',
+    //   side: 'buy',
+    //   order_type: 'limit',
+    //   price: 50000,
+    //   total_quantity: 0.001,
+    //   leverage: 5,
+    //   time_in_force: 'good_till_cancel',
+    //   take_profit_price: 55000,
+    //   stop_loss_price: 48000,
+    // });
+    // console.log('\n✅ Order Created:', order.id);
+
+    // 8. List open orders
+    // const orders = await client.listFuturesOrders({ status: 'open', margin_currency_short_name: ['USDT'] });
+    // console.log('\n✅ Open Orders:', orders.length);
+
+    // 9. Get positions
+    // const positions = await client.getFuturesPositions({ size: 10 });
+    // console.log('\n✅ Positions:', positions.length);
+
+  } catch (err) {
+    console.error('\n❌ REST Error:', err.message);
+  }
+
+  // ========== WEBSOCKET EXAMPLES ==========
+
+  client.on('ws:connect', (data) => {
+    console.log('\n🔌 WS Connected:', data.socketId);
+  });
+
+  client.on('ws:disconnect', (data) => {
+    console.log('\n🔌 WS Disconnected:', data.reason);
+  });
+
+  client.on('ws:candlestick', (data) => {
+    console.log('\n📊 Candle:', data.pair, data.interval,
+      `O:${data.open} H:${data.high} L:${data.low} C:${data.close} V:${data.volume}`);
+  });
+
+  client.on('ws:depth-snapshot', (data) => {
+    console.log('\n📗 OB Snapshot:', data.bids.length, 'bids,', data.asks.length, 'asks');
+  });
+
+  client.on('ws:depth-update', (data) => {
+    console.log('\n📘 OB Update:', data.bids.length, 'bids,', data.asks.length, 'asks');
+  });
+
+  client.on('ws:new-trade', (data) => {
+    console.log('\n💰 Trade:', data.symbol, `@ ${data.price}`, `Qty: ${data.quantity}`,
+      data.isMaker ? '(Maker)' : '(Taker)');
+  });
+
+  client.on('ws:price-change', (data) => {
+    console.log('\n📈 Price:', data.price, 'Time:', new Date(data.timestamp).toISOString());
+  });
+
+  client.on('ws:currentPrices@futures#update', (data) => {
+    console.log('\n📋 Batch Prices:', Object.keys(data.prices).length, 'pairs updated');
+  });
+
+  client.on('ws:df-order-update', (data) => {
+    console.log('\n🔔 Futures Order Update:', data);
+  });
+
+  client.on('ws:df-position-update', (data) => {
+    console.log('\n📍 Futures Position Update:', data);
+  });
+
+  client.on('ws:balance-update', (data) => {
+    console.log('\n💳 Balance Update:', data);
+  });
+
+  // Connect and subscribe
+  await client.wsConnect();
+
+  const pair = 'B-BTC_USDT';
+  client.wsSubscribeCandles(pair, '1m');
+  client.wsSubscribeOrderBook(pair, 50);
+  client.wsSubscribeTrades(pair);
+  client.wsSubscribePrices(pair);
+  client.wsSubscribeCurrentPricesFutures();
+
+  // Private account stream (requires auth)
+  // client.wsSubscribeAccountFutures();
+
+  // Graceful shutdown
+  process.on('SIGINT', () => {
+    console.log('\n🛑 Shutting down...');
+    client.wsDisconnect();
+    process.exit(0);
+  });
+}
+
+// Run if called directly
+if (require.main === module) {
+  main().catch(console.error);
+}
+
+module.exports = { CoinDCXFuturesClient };
+```
+```
+/**
+ * CoinDCX Futures Complete Client TypeScript Declarations
+ * REST API + Socket.IO WebSocket
+ */
+
+export interface CoinDCXFuturesOptions {
+  restBaseUrl?: string;
+  publicBaseUrl?: string;
+  wsEndpoint?: string;
+  apiKey?: string;
+  apiSecret?: string;
+  autoReconnect?: boolean;
+  reconnectDelay?: number;
+  debug?: boolean;
+  timeout?: number;
+}
+
+// ==================== REST API TYPES ====================
+
+export interface ActiveInstrument {
+  pair: string;
+  instrument: string;
+  status: string;
+  max_leverage_long: number;
+  max_leverage_short: number;
+  min_quantity: number;
+  max_quantity: number;
+  step: number;
+  tick_size: number;
+  maker_fee: number;
+  taker_fee: number;
+  [key: string]: any;
+}
+
+export interface InstrumentDetails {
+  instrument: ActiveInstrument;
+  [key: string]: any;
+}
+
+export interface FuturesCandle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  quote_volume: number;
+  open_time: number;
+  close_time: number;
+  pair: string;
+  symbol: string;
+  duration: string;
+}
+
+
+export interface SpotCandle {
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  time: number;
+}
+
+export interface SpotTrade {
+  p: number;
+  q: number;
+  s: string;
+  T: number;
+  m: boolean;
+}
+
+export interface SpotOrderBook {
+  bids: Record<string, string>;
+  asks: Record<string, string>;
+}
+
+export interface FuturesCandlesResponse {
+  data: FuturesCandle[];
+  instrument: string;
+  pair: string;
+}
+
+export interface FuturesTrade {
+  price: number;
+  quantity: number;
+  is_maker: boolean;
+  timestamp: number;
+  [key: string]: any;
+}
+
+export interface FuturesOrderBook {
+  bids: Record<string, string>;
+  asks: Record<string, string>;
+  timestamp: number;
+  version: number;
+}
+
+export interface CreateFuturesOrderParams {
+  pair: string;
+  side: 'buy' | 'sell';
+  order_type: 'market' | 'limit' | 'stop_limit' | 'stop_market' | 'take_profit_limit' | 'take_profit_market';
+  total_quantity: number;
+  leverage: number;
+  price?: number;
+  stop_price?: number;
+  time_in_force?: 'good_till_cancel' | 'fill_or_kill' | 'immediate_or_cancel';
+  take_profit_price?: number;
+  stop_loss_price?: number;
+  post_only?: boolean;
+  hidden?: boolean;
+  client_order_id?: string;
+  margin_currency_short_name?: string;
+}
+
+export interface FuturesOrder {
+  id: string;
+  pair: string;
+  side: string;
+  order_type: string;
+  status: string;
+  total_quantity: number;
+  remaining_quantity: number;
+  price: number;
+  leverage: number;
+  created_at: string;
+  updated_at: string;
+  [key: string]: any;
+}
+
+export interface ListFuturesOrdersFilters {
+  side?: 'buy' | 'sell';
+  status?: 'open' | 'partially_filled' | 'filled' | 'cancelled' | 'rejected';
+  margin_currency_short_name?: string[];
+  pair?: string;
+  page?: number;
+  size?: number;
+}
+
+export interface FuturesPosition {
+  id: string;
+  pair: string;
+  side: string;
+  quantity: number;
+  entry_price: number;
+  leverage: number;
+  pnl: number;
+  margin: number;
+  status: string;
+  [key: string]: any;
+}
+
+
+export interface SubAccountTransferParams {
+  fromAccountId: string;
+  toAccountId: string;
+  currencyShortName: string;
+  amount: number;
+}
+
+export interface SubAccountTransferResult {
+  status: string;
+  message: string | number;
+  code: number;
+}
+
+export interface WalletTransferParams {
+  sourceWalletType: 'spot' | 'futures';
+  destinationWalletType: 'spot' | 'futures';
+  currencyShortName: string;
+  amount: number;
+}
+
+export interface Balance {
+  currency: string;
+  balance: string;
+  locked_balance: string;
+}
+
+export interface UserInfo {
+  coindcx_id: string;
+  first_name: string;
+  last_name: string;
+  mobile_number: string;
+  email: string;
+}
+
+// ==================== WEBSOCKET TYPES ====================
+
+export interface CandlestickData {
+  channel: string;
+  product: string;
+  eventTime?: number;
+  interval: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  volume: number;
+  quoteVolume: number;
+  openTime: number;
+  closeTime: number;
+  pair: string;
+  symbol: string;
+  duration: string;
+  raw: any;
+}
+
+export interface DepthLevel {
+  price: number;
+  quantity: number;
+}
+
+export interface DepthData {
+  timestamp: number;
+  version: number;
+  product: string;
+  bids: DepthLevel[];
+  asks: DepthLevel[];
+  raw: any;
+}
+
+export interface TradeData {
+  timestamp: number;
+  receiveTime?: number;
+  price: number;
+  quantity: number;
+  isMaker: boolean;
+  symbol: string;
+  product: string;
+  raw: any;
+}
+
+export interface PriceChangeData {
+  timestamp: number;
+  price: number;
+  product: string;
+  raw: any;
+}
+
+export interface CurrentPricesData {
+  version: number;
+  timestamp: number;
+  product: string;
+  pST?: number;
+  prices: Record<string, {
+    markPrice?: number;
+    bmST?: number;
+    cmRT?: number;
+  }>;
+  raw: any;
+}
+
+export interface WSConnectEvent {
+  socketId: string;
+}
+
+export interface WSDisconnectEvent {
+  reason: string;
+}
+
+export interface WSErrorEvent {
+  type: string;
+  error: Error;
+}
+
+export type FuturesInterval = '1m' | '5m' | '15m' | '30m' | '1h' | '4h' | '8h' | '1D' | '3D' | '1W' | '1M';
+export type OrderBookDepth = 10 | 20 | 50;
+export type OrderSide = 'buy' | 'sell';
+export type OrderStatus = 'open' | 'partially_filled' | 'filled' | 'cancelled' | 'rejected';
+
+// ==================== MAIN CLASS ====================
+
+export declare class CoinDCXFuturesClient extends EventEmitter {
+  constructor(options?: CoinDCXFuturesOptions);
+
+  // ---------- REST: Public Futures Endpoints ----------
+
+  getActiveInstruments(marginCurrencyShortName?: string): Promise<ActiveInstrument[]>;
+  getInstrumentDetails(pair: string, marginCurrencyShortName?: string): Promise<InstrumentDetails>;
+  getFuturesCandles(pair: string, fromTime: number, toTime: number, resolution?: string): Promise<FuturesCandlesResponse>;
+  getFuturesTradeHistory(pair: string, limit?: number): Promise<FuturesTrade[]>;
+  getFuturesOrderBook(instrument: string, depth?: number): Promise<FuturesOrderBook>;
+  getFuturesCurrentPrices(): Promise<Record<string, any>>;
+  getFundingRateHistory(pair: string, limit?: number): Promise<any[]>;
+
+  // ---------- REST: Spot Market Data (Public) ----------
+
+  getSpotCandles(pair: string, interval?: string, startTime?: number, endTime?: number, limit?: number): Promise<SpotCandle[]>;
+  getSpotTradeHistory(pair: string, limit?: number): Promise<SpotTrade[]>;
+  getSpotOrderBook(pair: string): Promise<SpotOrderBook>;
+
+  // ---------- REST: Authenticated Futures Endpoints ----------
+
+  createFuturesOrder(params: CreateFuturesOrderParams): Promise<FuturesOrder>;
+  listFuturesOrders(filters?: ListFuturesOrdersFilters): Promise<{ orders: FuturesOrder[]; pagination: any }>;
+  getFuturesOrder(id: string): Promise<FuturesOrder>;
+  cancelFuturesOrder(id: string): Promise<{ status: string; message: string }>;
+  cancelAllFuturesOrders(pair: string, side?: OrderSide): Promise<{ status: string; message: string }>;
+  editFuturesOrder(params: { id: string; total_quantity?: number; price?: number; take_profit_price?: number; stop_loss_price?: number }): Promise<FuturesOrder>;
+  getFuturesPositions(filters?: { page?: number; size?: number; pair?: string; margin_currency_short_name?: string }): Promise<{ positions: FuturesPosition[]; pagination: any }>;
+  closeFuturesPosition(id: string): Promise<{ status: string; message: string }>;
+  updateLeverage(pair: string, leverage: number): Promise<{ status: string; message: string }>;
+  getFuturesTransactions(filters?: { pair?: string; from_time?: number; to_time?: number; page?: number; size?: number }): Promise<any>;
+  addFuturesMargin(id: string, amount: number): Promise<{ status: string; message: string }>;
+  removeFuturesMargin(id: string, amount: number): Promise<{ status: string; message: string }>;
+
+  // ---------- REST: Legacy Spot/Margin Endpoints ----------
+
+  getTicker(): Promise<any[]>;
+  getMarkets(): Promise<string[]>;
+  getMarketsDetails(): Promise<any[]>;
+  getBalances(): Promise<Balance[]>;
+  getUserInfo(): Promise<UserInfo>;
+  walletTransfer(sourceWalletType: string, destinationWalletType: string, currencyShortName: string, amount: number): Promise<{ status: string; message: string; code: number }>;
+  subAccountTransfer(params: SubAccountTransferParams): Promise<SubAccountTransferResult>;
+
+
+  // ---------- WebSocket Methods ----------
+
+  wsConnect(): Promise<void>;
+  wsDisconnect(): void;
+  wsIsConnected(): boolean;
+  wsGetSubscribedChannels(): string[];
+
+  wsSubscribeCandles(pair: string, interval?: FuturesInterval): void;
+  wsUnsubscribeCandles(pair: string, interval?: FuturesInterval): void;
+  wsSubscribeOrderBook(pair: string, depth?: OrderBookDepth): void;
+  wsUnsubscribeOrderBook(pair: string, depth?: OrderBookDepth): void;
+  wsSubscribeTrades(pair: string): void;
+  wsUnsubscribeTrades(pair: string): void;
+  wsSubscribePrices(pair: string): void;
+  wsUnsubscribePrices(pair: string): void;
+  wsSubscribeCurrentPricesFutures(): void;
+  wsUnsubscribeCurrentPricesFutures(): void;
+  wsSubscribeAccountFutures(): void;
+  wsUnsubscribeAccountFutures(): void;
+
+  // ---------- Static Helpers ----------
+
+  static buildPair(base: string, quote: string, ecode?: string): string;
+  static parsePair(pair: string): { ecode: string; base: string; quote: string } | null;
+  static msToSeconds(ms: number): number;
+  static secondsToMs(seconds: number): number;
+  static nowSeconds(): number;
+
+  // ---------- EventEmitter Overloads ----------
+
+  on(event: 'ws:connect', listener: (data: WSConnectEvent) => void): this;
+  on(event: 'ws:disconnect', listener: (data: WSDisconnectEvent) => void): this;
+  on(event: 'ws:error', listener: (data: WSErrorEvent) => void): this;
+  on(event: 'ws:candlestick', listener: (data: CandlestickData) => void): this;
+  on(event: 'ws:depth-snapshot', listener: (data: DepthData) => void): this;
+  on(event: 'ws:depth-update', listener: (data: DepthData) => void): this;
+  on(event: 'ws:new-trade', listener: (data: TradeData) => void): this;
+  on(event: 'ws:price-change', listener: (data: PriceChangeData) => void): this;
+  on(event: 'ws:currentPrices@futures#update', listener: (data: CurrentPricesData) => void): this;
+  on(event: 'ws:df-order-update', listener: (data: any) => void): this;
+  on(event: 'ws:df-position-update', listener: (data: any) => void): this;
+  on(event: 'ws:balance-update', listener: (data: any) => void): this;
+  on(event: string | symbol, listener: (...args: any[]) => void): this;
+
+  emit(event: 'ws:connect', data: WSConnectEvent): boolean;
+  emit(event: 'ws:disconnect', data: WSDisconnectEvent): boolean;
+  emit(event: 'ws:error', data: WSErrorEvent): boolean;
+  emit(event: 'ws:candlestick', data: CandlestickData): boolean;
+  emit(event: 'ws:depth-snapshot', data: DepthData): boolean;
+  emit(event: 'ws:depth-update', data: DepthData): boolean;
+  emit(event: 'ws:new-trade', data: TradeData): boolean;
+  emit(event: 'ws:price-change', data: PriceChangeData): boolean;
+  emit(event: 'ws:currentPrices@futures#update', data: CurrentPricesData): boolean;
+  emit(event: 'ws:df-order-update', data: any): boolean;
+  emit(event: 'ws:df-position-update', data: any): boolean;
+  emit(event: 'ws:balance-update', data: any): boolean;
+  emit(event: string | symbol, ...args: any[]): boolean;
+}
+```
+```
+{
+  "name": "coindcx-futures-client",
+  "version": "2.1.0",
+  "description": "Complete CoinDCX Futures Client - REST API + Socket.IO WebSocket with all documented endpoints",
+  "main": "coindcx-futures-client.js",
+  "types": "coindcx-futures-client.d.ts",
+  "scripts": {
+    "start": "node coindcx-futures-client.js",
+    "test": "node -e "const {CoinDCXFuturesClient} = require('./coindcx-futures-client'); console.log('Module loaded OK')""
+  },
+  "keywords": [
+    "coindcx",
+    "futures",
+    "websocket",
+    "socket.io",
+    "rest-api",
+    "crypto",
+    "trading",
+    "api",
+    "derivatives"
+  ],
+  "author": "",
+  "license": "MIT",
+  "dependencies": {
+    "socket.io-client": "2.4.0"
+  },
+  "optionalDependencies": {
+    "axios": "^1.6.0"
+  },
+  "engines": {
+    "node": ">=18.0.0"
+  }
+}
+```
