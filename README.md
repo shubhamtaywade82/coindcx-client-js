@@ -78,7 +78,21 @@ main();
 
 ## Documentation
 
-Refer to `docs/API_DOCUMENTATION.md` for detailed information on endpoints and mapping.
+### IDE Support (IntelliSense)
+The library is fully documented with **JSDoc**. You will get instant parameter descriptions and type hints directly in your IDE (VS Code, WebStorm, etc.).
+
+### API Reference
+You can generate a searchable HTML API reference locally:
+
+```bash
+npm run docs
+```
+The documentation will be generated in the `docs/api/` folder. Open `docs/api/index.html` in your browser.
+
+### Advanced Examples
+Check the `examples/` folder for practical implementations:
+- `quickstart.js`: Basic REST and WebSocket usage.
+- `trailing-stop-loss.js`: Real-time price monitoring and automated order editing.
 
 ## License
 

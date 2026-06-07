@@ -5,21 +5,35 @@ const EventEmitter = require('events');
 
 /**
  * CoinDCX Futures Client Library (REST + Socket.IO)
- * Version: 2.1.0
+ * 
+ * Provides a unified interface for CoinDCX Futures, Spot, Margin, and Lending APIs.
+ * Includes automatic signature generation, data normalization, and robust WebSocket handling.
+ * 
+ * @version 2.1.0
+ * @extends EventEmitter
  */
 class CoinDCXFuturesClient extends EventEmitter {
+    /**
+     * @param {Object} options - Configuration options.
+     * @param {string} [options.apiKey=''] - Your CoinDCX API Key.
+     * @param {string} [options.apiSecret=''] - Your CoinDCX API Secret.
+     * @param {boolean} [options.debug=false] - Enable console logging for requests and events.
+     * @param {string} [options.apiBase='https://api.coindcx.com'] - Base URL for authenticated and general APIs.
+     * @param {string} [options.publicApiBase='https://public.coindcx.com'] - Base URL for market data APIs.
+     * @param {string} [options.wsBase='wss://stream.coindcx.com'] - Socket.IO endpoint.
+     * @param {boolean} [options.autoReconnect=true] - Automatically reconnect WebSocket on drop.
+     * @param {number} [options.reconnectDelay=5000] - Delay between reconnection attempts in ms.
+     */
     constructor(options = {}) {
         super();
         this.apiKey = options.apiKey || '';
         this.apiSecret = options.apiSecret || '';
         this.debug = options.debug || false;
         
-        // Base URLs
         this.apiBase = options.apiBase || 'https://api.coindcx.com';
         this.publicApiBase = options.publicApiBase || 'https://public.coindcx.com';
         this.wsBase = options.wsBase || 'wss://stream.coindcx.com';
         
-        // WebSocket state
         this.socket = null;
         this.connected = false;
         this.subscribedChannels = new Set();
@@ -30,7 +44,6 @@ class CoinDCXFuturesClient extends EventEmitter {
         this.autoReconnect = options.autoReconnect !== false;
         this.reconnectDelay = options.reconnectDelay || 5000;
 
-        // WebSocket Event Names
         this.wsEvents = {
             candles: 'candlestick',
             orderBookSnapshot: 'depth-snapshot',
@@ -46,18 +59,39 @@ class CoinDCXFuturesClient extends EventEmitter {
 
     // --- Static Helpers ---
 
+    /**
+     * Returns current time in seconds (CoinDCX requirement).
+     * @returns {number}
+     */
     static nowSeconds() {
         return Math.floor(Date.now() / 1000);
     }
 
+    /**
+     * Converts milliseconds to seconds.
+     * @param {number} ms 
+     * @returns {number}
+     */
     static msToSeconds(ms) {
         return Math.floor(ms / 1000);
     }
 
+    /**
+     * Builds a canonical pair string.
+     * @param {string} base - Target asset (e.g. BTC)
+     * @param {string} target - Base asset (e.g. USDT)
+     * @param {string} [ecode='B'] - Exchange code (B for Binance, I for CoinDCX)
+     * @returns {string} e.g. 'B-BTC_USDT'
+     */
     static buildPair(base, target, ecode = 'B') {
         return `${ecode}-${base}_${target}`;
     }
 
+    /**
+     * Parses a pair string into components.
+     * @param {string} pair - e.g. 'B-BTC_USDT'
+     * @returns {Object|null} { ecode, base, target }
+     */
     static parsePair(pair) {
         const match = pair.match(/^([A-Z])-([A-Z0-9]+)_([A-Z0-9]+)$/);
         if (match) {
@@ -78,6 +112,10 @@ class CoinDCXFuturesClient extends EventEmitter {
         console.error('[CoinDCX-Client]', ...args);
     }
 
+    /**
+     * Internal: Generates HMAC-SHA256 signature for JSON payloads.
+     * @private
+     */
     _generateSignature(payload) {
         if (!this.apiSecret) {
             throw new Error('API secret required for authenticated requests');
@@ -89,8 +127,11 @@ class CoinDCXFuturesClient extends EventEmitter {
             .digest('hex');
     }
 
+    /**
+     * Internal: Generic request handler with auto-signing and subdomain mapping.
+     * @private
+     */
     async _request(method, path, data = {}, isPublic = false) {
-        // Use public.coindcx.com for market_data endpoints, api.coindcx.com for others
         let baseUrl = path.startsWith('/market_data/') ? this.publicApiBase : this.apiBase;
         const url = `${baseUrl}${path}`;
         
@@ -128,16 +169,36 @@ class CoinDCXFuturesClient extends EventEmitter {
 
     // --- Public Futures Market Data ---
 
+    /**
+     * Fetches all active futures instruments.
+     * @param {string} [marginCurrency='USDT'] 
+     * @returns {Promise<string[]>} List of pair strings.
+     */
     async getActiveInstruments(marginCurrency = 'USDT') {
         return this._request('GET', '/exchange/v1/derivatives/futures/data/active_instruments', { margin_currency: marginCurrency }, true);
     }
 
+    /**
+     * Fetches detailed metadata for a specific instrument.
+     * Note: Documentation endpoint often 404s, uses getMarketsDetails as fallback.
+     * @param {string} pair - e.g. 'B-BTC_USDT'
+     * @returns {Promise<Object>}
+     */
     async getInstrumentDetails(pair, marginCurrency = 'USDT') {
-        // Fallback to market_details as documented /data/instruments often 404s
         const allDetails = await this.getMarketsDetails();
         return allDetails.find(m => m.pair === pair);
     }
 
+    /**
+     * Fetches historical futures candlestick data.
+     * Results are automatically reversed to ascending order (oldest first).
+     * @param {string} pair - e.g. 'B-BTC_USDT'
+     * @param {number} [from] - Start timestamp in seconds.
+     * @param {number} [to] - End timestamp in seconds.
+     * @param {string} [resolution='1m'] - '1m', '5m', '15m', '1h', etc.
+     * @param {number} [limit=500] - Number of candles.
+     * @returns {Promise<Object[]>}
+     */
     async getFuturesCandles(pair, from, to, resolution = '1m', limit = 500) {
         const params = { pair, interval: resolution };
         if (from) params.startTime = from * 1000;
@@ -148,24 +209,53 @@ class CoinDCXFuturesClient extends EventEmitter {
         return Array.isArray(response) ? response.reverse() : response;
     }
 
+    /**
+     * Fetches recent futures trade history.
+     * @param {string} pair - e.g. 'B-BTC_USDT'
+     * @param {number} [limit=50]
+     * @returns {Promise<Object[]>}
+     */
     async getFuturesTradeHistory(pair, limit = 50) {
         return this._request('GET', '/market_data/trade_history', { pair, limit }, true);
     }
 
+    /**
+     * Fetches futures L2 order book.
+     * @param {string} pair - e.g. 'B-BTC_USDT'
+     * @returns {Promise<Object>} { bids: {}, asks: {} }
+     */
     async getFuturesOrderBook(pair) {
         return this._request('GET', '/market_data/orderbook', { pair }, true);
     }
 
+    /**
+     * Fetches current ticker prices for all markets.
+     * @returns {Promise<Object[]>}
+     */
     async getFuturesCurrentPrices() {
-        return this.getTicker(); // Generic ticker provides all market prices
+        return this.getTicker();
     }
 
+    /**
+     * Fetches funding rate history for a pair.
+     * @param {string} pair 
+     * @param {number} [limit=50]
+     * @returns {Promise<Object[]>}
+     */
     async getFundingRateHistory(pair, limit = 50) {
         return this._request('GET', '/exchange/v1/derivatives/futures/data/funding_rate', { pair, limit }, true);
     }
 
     // --- Public Spot Market Data ---
 
+    /**
+     * Fetches spot candlestick data.
+     * @param {string} pair - e.g. 'B-BTC_USDT'
+     * @param {string} [interval='1m'] 
+     * @param {number} [startTime] 
+     * @param {number} [endTime] 
+     * @param {number} [limit=500]
+     */
     async getSpotCandles(pair, interval = '1m', startTime, endTime, limit = 500) {
         const params = { pair, interval };
         if (startTime) params.startTime = startTime;
@@ -175,188 +265,349 @@ class CoinDCXFuturesClient extends EventEmitter {
         return Array.isArray(response) ? response.reverse() : response;
     }
 
+    /**
+     * Fetches spot trade history.
+     * @param {string} pair 
+     * @param {number} [limit=50]
+     */
     async getSpotTradeHistory(pair, limit = 50) {
         return this._request('GET', '/market_data/trade_history', { pair, limit }, true);
     }
 
+    /**
+     * Fetches spot L2 order book.
+     * @param {string} pair 
+     */
     async getSpotOrderBook(pair) {
         return this._request('GET', '/market_data/orderbook', { pair }, true);
     }
 
     // --- Authenticated Spot Trading ---
 
+    /**
+     * Creates a single spot order.
+     * @param {Object} params - { side, order_type, market, price, quantity, client_order_id }
+     */
     async createOrder(params) {
         return this._request('POST', '/exchange/v1/orders/create', params);
     }
 
+    /**
+     * Creates multiple spot orders in a single call.
+     * @param {Object[]} orders - Array of order objects.
+     */
     async createMultipleOrders(orders) {
         return this._request('POST', '/exchange/v1/orders/create_multiple', { orders });
     }
 
+    /**
+     * Fetches status of a single spot order.
+     * @param {string|number} id - Order ID.
+     */
     async getOrderStatus(id) {
         return this._request('POST', '/exchange/v1/orders/status', { id });
     }
 
+    /**
+     * Fetches status of multiple spot orders.
+     * @param {Array} ids - Array of Order IDs.
+     */
     async getOrderStatusMultiple(ids) {
         return this._request('POST', '/exchange/v1/orders/status_multiple', { ids });
     }
 
+    /**
+     * Lists all currently active/open spot orders.
+     */
     async getActiveOrders() {
         return this._request('POST', '/exchange/v1/orders/active_orders', {});
     }
 
+    /**
+     * Cancels a single spot order.
+     * @param {string|number} id 
+     */
     async cancelOrder(id) {
         return this._request('POST', '/exchange/v1/orders/cancel', { id });
     }
 
+    /**
+     * Bulk cancels spot orders.
+     * @param {string} [side] - 'buy' or 'sell'
+     * @param {string} [market] - e.g. 'BTCUSDT'
+     */
     async cancelAllOrders(side, market) {
         return this._request('POST', '/exchange/v1/orders/cancel_all', { side, market });
     }
 
+    /**
+     * Cancels specific spot orders by IDs.
+     * @param {Array} ids 
+     */
     async cancelOrdersByIds(ids) {
         return this._request('POST', '/exchange/v1/orders/cancel_by_ids', { ids });
     }
 
+    /**
+     * Edits the price of an existing open spot order.
+     * @param {string|number} id 
+     * @param {number} price 
+     */
     async editOrder(id, price) {
         return this._request('POST', '/exchange/v1/orders/edit', { id, price });
     }
 
-    async getSpotTradeHistory(market, limit = 50) {
+    /**
+     * Fetches your personal spot trade history.
+     * @param {string} market 
+     * @param {number} [limit=50]
+     */
+    async getUserSpotTradeHistory(market, limit = 50) {
         return this._request('POST', '/exchange/v1/orders/trade_history', { market, limit });
     }
 
     // --- Authenticated Legacy Margin Trading ---
 
+    /**
+     * Places a legacy margin order.
+     * @param {Object} params - { market, side, order_type, price, quantity, leverage, stop_price, target_price, sl_price }
+     */
     async createMarginOrder(params) {
         return this._request('POST', '/exchange/v1/margin/create', params);
     }
 
+    /**
+     * Cancels a margin order.
+     * @param {string|number} id 
+     */
     async cancelMarginOrder(id) {
         return this._request('POST', '/exchange/v1/margin/cancel', { id });
     }
 
+    /**
+     * Markets-closes an open margin position.
+     * @param {string|number} id - Order/Position ID.
+     */
     async exitMarginPosition(id) {
         return this._request('POST', '/exchange/v1/margin/exit', { id });
     }
 
+    /**
+     * Edits the take-profit price of a margin position.
+     */
     async editMarginTarget(id, target_price) {
         return this._request('POST', '/exchange/v1/margin/edit_target', { id, target_price });
     }
 
+    /**
+     * Edits the price of a pending margin target order.
+     */
     async editMarginPriceOfTargetOrder(id, price) {
         return this._request('POST', '/exchange/v1/margin/edit_price_of_target_order', { id, price });
     }
 
+    /**
+     * Edits the stop-loss price of a margin position.
+     */
     async editMarginSL(id, sl_price) {
         return this._request('POST', '/exchange/v1/margin/edit_sl', { id, sl_price });
     }
 
+    /**
+     * Edits the trailing stop-loss of a margin position.
+     */
     async editMarginTrailingSL(id, trailing_sl) {
         return this._request('POST', '/exchange/v1/margin/edit_trailing_sl', { id, trailing_sl });
     }
 
+    /**
+     * Adds margin to an open position to lower liquidation risk.
+     */
     async addMargin(id, amount) {
         return this._request('POST', '/exchange/v1/margin/add_margin', { id, amount });
     }
 
+    /**
+     * Removes margin from an open position.
+     */
     async removeMargin(id, amount) {
         return this._request('POST', '/exchange/v1/margin/remove_margin', { id, amount });
     }
 
+    /**
+     * Lists open margin positions.
+     */
     async fetchMarginOrders(params = {}) {
         return this._request('POST', '/exchange/v1/margin/fetch_orders', params);
     }
 
+    /**
+     * Fetches details of a single margin order.
+     */
     async getMarginOrder(id) {
         return this._request('POST', '/exchange/v1/margin/order', { id });
     }
 
     // --- Authenticated Lending ---
 
+    /**
+     * Lists your active lending orders.
+     */
     async fetchLendOrders() {
         return this._request('POST', '/exchange/v1/funding/fetch_orders', {});
     }
 
+    /**
+     * Lends funds to the platform for interest.
+     * @param {string} currency - e.g. 'USDT'
+     * @param {number} amount 
+     * @param {string} side - 'lend'
+     */
     async lend(currency, amount, side) {
         return this._request('POST', '/exchange/v1/funding/lend', { currency, amount, side });
     }
 
+    /**
+     * Settles a lending order.
+     * @param {string|number} id 
+     */
     async settleLendOrder(id) {
         return this._request('POST', '/exchange/v1/funding/settle', { id });
     }
 
     // --- Authenticated Futures Trading ---
 
+    /**
+     * Creates a new futures order (Derivatives).
+     * Supports bracket orders with take_profit_price and stop_loss_price.
+     * @param {Object} params - { pair, side, order_type, price, total_quantity, leverage, take_profit_price, stop_loss_price }
+     */
     async createFuturesOrder(params) {
         return this._request('POST', '/exchange/v1/derivatives/futures/orders/create', params);
     }
 
+    /**
+     * Lists futures orders with filters.
+     * @param {Object} filters - { pair, side, status, size, page }
+     */
     async listFuturesOrders(filters = {}) {
         return this._request('POST', '/exchange/v1/derivatives/futures/orders', filters);
     }
 
+    /**
+     * Fetches details of a single futures order.
+     */
     async getFuturesOrder(id) {
         return this._request('POST', '/exchange/v1/derivatives/futures/orders/details', { id });
     }
 
+    /**
+     * Cancels a futures order.
+     */
     async cancelFuturesOrder(id) {
         return this._request('POST', '/exchange/v1/derivatives/futures/orders/cancel', { id });
     }
 
+    /**
+     * Bulk cancels futures orders.
+     */
     async cancelAllFuturesOrders(pair, side) {
         return this._request('POST', '/exchange/v1/derivatives/futures/orders/cancel_all', { pair, side });
     }
 
+    /**
+     * Edits price, quantity, or TP/SL of a futures order.
+     */
     async editFuturesOrder(params) {
         return this._request('POST', '/exchange/v1/derivatives/futures/orders/edit', params);
     }
 
+    /**
+     * Lists open futures positions.
+     */
     async getFuturesPositions(filters = {}) {
         return this._request('POST', '/exchange/v1/derivatives/futures/positions', filters);
     }
 
+    /**
+     * Market-closes an open futures position.
+     */
     async closeFuturesPosition(id) {
         return this._request('POST', '/exchange/v1/derivatives/futures/positions/close', { id });
     }
 
+    /**
+     * Updates leverage for a specific futures pair.
+     */
     async updateLeverage(pair, leverage) {
         return this._request('POST', '/exchange/v1/derivatives/futures/leverage', { pair, leverage });
     }
 
+    /**
+     * Fetches futures transaction history (fills).
+     */
     async getFuturesTransactions(filters = {}) {
         return this._request('POST', '/exchange/v1/derivatives/futures/transactions', filters);
     }
 
+    /**
+     * Adds margin to a futures position.
+     */
     async addFuturesMargin(id, amount) {
         return this._request('POST', '/exchange/v1/derivatives/futures/positions/add_margin', { id, amount });
     }
 
+    /**
+     * Removes margin from a futures position.
+     */
     async removeFuturesMargin(id, amount) {
         return this._request('POST', '/exchange/v1/derivatives/futures/positions/remove_margin', { id, amount });
     }
 
     // --- Wallet & Sub-Account ---
 
+    /**
+     * Fetches ticker data for all active pairs.
+     */
     async getTicker() {
         return this._request('GET', '/exchange/ticker', {}, true);
     }
 
+    /**
+     * Fetches list of all active market symbols.
+     */
     async getMarkets() {
         return this._request('GET', '/exchange/v1/markets', {}, true);
     }
 
+    /**
+     * Fetches detailed metadata for all pairs.
+     */
     async getMarketsDetails() {
         return this._request('GET', '/exchange/v1/markets_details', {}, true);
     }
 
+    /**
+     * Fetches your account balances.
+     */
     async getBalances() {
         return this._request('POST', '/exchange/v1/users/balances', {});
     }
 
+    /**
+     * Fetches basic account/user information.
+     */
     async getUserInfo() {
         return this._request('POST', '/exchange/v1/users/info', {});
     }
 
+    /**
+     * Transfers funds between spot and futures wallets.
+     * @param {string} sourceWalletType - 'spot' or 'futures'
+     * @param {string} destinationWalletType - 'spot' or 'futures'
+     * @param {string} currencyShortName - e.g. 'USDT'
+     * @param {number} amount 
+     */
     async walletTransfer(sourceWalletType, destinationWalletType, currencyShortName, amount) {
         return this._request('POST', '/exchange/v1/wallets/transfer', {
             source_wallet_type: sourceWalletType,
@@ -366,12 +617,23 @@ class CoinDCXFuturesClient extends EventEmitter {
         });
     }
 
+    /**
+     * Transfers funds between master and sub-accounts (Spot wallets).
+     * @param {Object} params - { fromAccountId, toAccountId, currencyShortName, amount }
+     */
     async subAccountTransfer(params) {
         return this._request('POST', '/exchange/v1/wallets/sub_account_transfer', params);
     }
 
     // --- WebSocket (Socket.IO v2.4.0) ---
 
+    /**
+     * Connects to the CoinDCX Socket.IO server.
+     * @returns {Promise<void>} Resolves on successful connection.
+     * @fires ws:connect
+     * @fires ws:disconnect
+     * @fires ws:error
+     */
     async wsConnect() {
         if (this.socket && this.connected) return;
 
@@ -414,6 +676,10 @@ class CoinDCXFuturesClient extends EventEmitter {
         });
     }
 
+    /**
+     * Setup WebSocket event listeners and emission of normalized events.
+     * @private
+     */
     _setupWsListeners() {
         // Market Data
         this.socket.on(this.wsEvents.candles, (res) => this.emit('ws:candlestick', this._normalizeCandle(res)));
@@ -429,6 +695,10 @@ class CoinDCXFuturesClient extends EventEmitter {
         this.socket.on(this.wsEvents.accountBalance, (res) => this.emit('ws:balance-update', this._parseWsData(res)));
     }
 
+    /**
+     * Parses Socket.IO data which is often a JSON string.
+     * @private
+     */
     _parseWsData(res) {
         if (!res) return null;
         if (typeof res.data === 'string') {
@@ -437,6 +707,10 @@ class CoinDCXFuturesClient extends EventEmitter {
         return res.data || res;
     }
 
+    /**
+     * Normalizes candlestick WebSocket data.
+     * @private
+     */
     _normalizeCandle(res) {
         const p = this._parseWsData(res);
         const c = Array.isArray(p.data) ? p.data[0] : p;
@@ -457,6 +731,10 @@ class CoinDCXFuturesClient extends EventEmitter {
         };
     }
 
+    /**
+     * Normalizes depth WebSocket data from object to tuple array.
+     * @private
+     */
     _normalizeDepth(res) {
         const p = this._parseWsData(res);
         const mapLevels = (lvls) => lvls ? Object.entries(lvls).map(([pr, q]) => ({ price: parseFloat(pr), quantity: parseFloat(q) })) : [];
@@ -468,6 +746,10 @@ class CoinDCXFuturesClient extends EventEmitter {
         };
     }
 
+    /**
+     * Normalizes trade WebSocket data.
+     * @private
+     */
     _normalizeTrade(res) {
         const p = this._parseWsData(res);
         return {
@@ -496,18 +778,45 @@ class CoinDCXFuturesClient extends EventEmitter {
         return { timestamp: p.ts, prices, raw: res };
     }
 
+    /**
+     * Subscribes to a WebSocket channel.
+     * @param {string} channel 
+     */
     wsSubscribe(channel) {
         if (!this.connected) return this.pendingSubscriptions.add(channel);
         this.socket.emit('join', { channelName: channel });
         this.subscribedChannels.add(channel);
     }
 
+    /**
+     * Convenience: Subscribes to candlestick stream.
+     */
     wsSubscribeCandles(pair, interval = '1m') { this.wsSubscribe(`${pair}_${interval}-futures`); }
+    
+    /**
+     * Convenience: Subscribes to order book updates.
+     */
     wsSubscribeOrderBook(pair, depth = 50) { this.wsSubscribe(`${pair}@orderbook@${depth}-futures`); }
+    
+    /**
+     * Convenience: Subscribes to new trades.
+     */
     wsSubscribeTrades(pair) { this.wsSubscribe(`${pair}@trades-futures`); }
+    
+    /**
+     * Convenience: Subscribes to price changes.
+     */
     wsSubscribePrices(pair) { this.wsSubscribe(`${pair}@prices-futures`); }
+    
+    /**
+     * Convenience: Subscribes to batch current prices.
+     */
     wsSubscribeCurrentPricesFutures() { this.wsSubscribe('currentPrices@futures@rt'); }
 
+    /**
+     * Subscribes to private account event streams (orders, positions, balances).
+     * @throws {Error} If apiKey/Secret are missing.
+     */
     wsSubscribeAccountFutures() {
         if (!this.apiKey || !this.apiSecret) throw new Error('API Key/Secret required for account streams');
         const channel = 'coindcx';
@@ -516,6 +825,10 @@ class CoinDCXFuturesClient extends EventEmitter {
         this.subscribedChannels.add(channel);
     }
 
+    /**
+     * Resubscribes to all previously active channels after a reconnect.
+     * @private
+     */
     _resubscribeAll() {
         const all = [...this.subscribedChannels, ...this.pendingSubscriptions];
         this.subscribedChannels.clear();
@@ -538,6 +851,9 @@ class CoinDCXFuturesClient extends EventEmitter {
         }, this.reconnectDelay);
     }
 
+    /**
+     * Disconnects the WebSocket and stops auto-reconnection.
+     */
     wsDisconnect() {
         this.autoReconnect = false;
         this._stopPing();

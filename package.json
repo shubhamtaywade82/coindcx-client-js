@@ -1,16 +1,42 @@
 {
-  "name": "coindcx-client",
+  "name": "coindcx-client-js",
   "version": "1.0.0",
-  "description": "",
+  "description": "Comprehensive Node.js SDK for CoinDCX API supporting Futures, Spot, Margin, and Lending with WebSocket (Socket.IO) integration.",
   "main": "coindcx-futures-client.js",
+  "types": "coindcx-futures-client.d.ts",
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1"
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "docs": "jsdoc coindcx-futures-client.js -d docs/api -R README.md",
+    "check": "node -c coindcx-futures-client.js"
   },
-  "author": "",
+  "keywords": [
+    "coindcx",
+    "crypto",
+    "futures",
+    "trading",
+    "sdk",
+    "node",
+    "websocket",
+    "socket.io",
+    "bitcoin",
+    "binance"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/shubhamtaywade82/coindcx-client-js.git"
+  },
+  "author": "Shubham Taywade",
   "license": "ISC",
+  "bugs": {
+    "url": "https://github.com/shubhamtaywade82/coindcx-client-js/issues"
+  },
+  "homepage": "https://github.com/shubhamtaywade82/coindcx-client-js#readme",
   "dependencies": {
     "axios": "^1.17.0",
     "dotenv": "^17.4.2",
     "socket.io-client": "^2.4.0"
+  },
+  "devDependencies": {
+    "jsdoc": "^4.0.5"
   }
 }
