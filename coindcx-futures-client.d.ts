@@ -9,17 +9,9 @@ export interface CoinDCXOptions {
     wsBase?: string;
     autoReconnect?: boolean;
     reconnectDelay?: number;
-}
-
-export interface Candle {
-    open: number;
-    high: number;
-    low: number;
-    close: number;
-    volume: number;
-    time: number;
-    pair: string;
-    [key: string]: any;
+    maxRetries?: number;
+    rateLimitWindow?: number;
+    maxRequestsPerWindow?: number;
 }
 
 export interface NormalizedCandle {
@@ -73,23 +65,26 @@ export class CoinDCXFuturesClient extends EventEmitter {
     constructor(options?: CoinDCXOptions);
 
     static nowSeconds(): number;
-    static msToSeconds(ms: number): number;
     static buildPair(base: string, target: string, ecode?: string): string;
     static parsePair(pair: string): { ecode: string; base: string; target: string } | null;
+    static calculateLiquidationPrice(entryPrice: number, leverage: number, side: string, mm?: number): number;
 
     // Public Futures Market Data
     getActiveInstruments(marginCurrency?: string): Promise<string[]>;
-    getInstrumentDetails(pair: string, marginCurrency?: string): Promise<any>;
+    getMarketsDetails(): Promise<any[]>;
+    getInstrumentDetails(pair: string): Promise<any>;
     getFuturesCandles(pair: string, from?: number, to?: number, resolution?: string, limit?: number): Promise<any[]>;
     getFuturesTradeHistory(pair: string, limit?: number): Promise<any[]>;
     getFuturesOrderBook(pair: string): Promise<any>;
-    getFuturesCurrentPrices(): Promise<any>;
-    getFundingRateHistory(pair: string, limit?: number): Promise<any>;
+    getTicker(): Promise<any[]>;
+    getFundingRateHistory(pair: string, limit?: number): Promise<any[]>;
+    getFuturesStats(): Promise<any>;
 
     // Public Spot Market Data
     getSpotCandles(pair: string, interval?: string, startTime?: number, endTime?: number, limit?: number): Promise<any[]>;
     getSpotTradeHistory(pair: string, limit?: number): Promise<any[]>;
     getSpotOrderBook(pair: string): Promise<any>;
+    getActiveOrdersCount(): Promise<any>;
 
     // Authenticated Spot Trading
     createOrder(params: any): Promise<any>;
@@ -101,7 +96,7 @@ export class CoinDCXFuturesClient extends EventEmitter {
     cancelAllOrders(side?: string, market?: string): Promise<any>;
     cancelOrdersByIds(ids: (string | number)[]): Promise<any>;
     editOrder(id: string | number, price: number): Promise<any>;
-    getSpotTradeHistory(market: string, limit?: number): Promise<any[]>;
+    getUserSpotTradeHistory(market: string, limit?: number): Promise<any[]>;
 
     // Authenticated Legacy Margin Trading
     createMarginOrder(params: any): Promise<any>;
@@ -123,24 +118,31 @@ export class CoinDCXFuturesClient extends EventEmitter {
 
     // Authenticated Futures Trading
     createFuturesOrder(params: any): Promise<any>;
-    listFuturesOrders(filters?: any): Promise<any>;
+    listFuturesOrders(filters?: any): Promise<any[]>;
     getFuturesOrder(id: string | number): Promise<any>;
     cancelFuturesOrder(id: string | number): Promise<any>;
     cancelAllFuturesOrders(pair?: string, side?: string): Promise<any>;
     editFuturesOrder(params: any): Promise<any>;
-    getFuturesPositions(filters?: any): Promise<any>;
+    getFuturesPositions(filters?: any): Promise<any[]>;
     closeFuturesPosition(id: string | number): Promise<any>;
+    exitFuturesPosition(pair: string): Promise<any>;
+    createFuturesTPSL(params: any): Promise<any>;
+    getFuturesCrossMarginDetails(): Promise<any>;
+    updateFuturesMarginType(pair: string, margin_type: string): Promise<any>;
     updateLeverage(pair: string, leverage: number): Promise<any>;
-    getFuturesTransactions(filters?: any): Promise<any>;
+    getFuturesTrades(filters?: any): Promise<any[]>;
     addFuturesMargin(id: string | number, amount: number): Promise<any>;
     removeFuturesMargin(id: string | number, amount: number): Promise<any>;
+    cancelAllOrdersForPosition(position_id: string | number): Promise<any>;
+    getFuturesTransactions(filters?: any): Promise<any[]>;
 
     // Wallet & Sub-Account
-    getTicker(): Promise<any[]>;
     getMarkets(): Promise<string[]>;
-    getMarketsDetails(): Promise<any[]>;
     getBalances(): Promise<any[]>;
     getUserInfo(): Promise<any>;
+    getFuturesWallet(): Promise<any>;
+    getFuturesWalletTransactions(): Promise<any>;
+    futuresWalletTransfer(transfer_type: string, currency_short_name: string, amount: number): Promise<any>;
     walletTransfer(sourceWalletType: string, destinationWalletType: string, currencyShortName: string, amount: number): Promise<any>;
     subAccountTransfer(params: { fromAccountId: string; toAccountId: string; currencyShortName: string; amount: number; [key: string]: any }): Promise<any>;
 
@@ -153,6 +155,10 @@ export class CoinDCXFuturesClient extends EventEmitter {
     wsSubscribeTrades(pair: string): void;
     wsSubscribePrices(pair: string): void;
     wsSubscribeCurrentPricesFutures(): void;
+    wsSubscribeSpotCandles(pair: string, interval?: string): void;
+    wsSubscribeSpotOrderBook(pair: string, depth?: number): void;
+    wsSubscribeSpotTrades(pair: string): void;
+    wsSubscribeSpotPrices(pair: string): void;
     wsSubscribeAccountFutures(): void;
 
     // Events
