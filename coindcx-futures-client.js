@@ -183,6 +183,108 @@ class CoinDCXFuturesClient extends EventEmitter {
         return this._request('GET', '/market_data/orderbook', { pair }, true);
     }
 
+    // --- Authenticated Spot Trading ---
+
+    async createOrder(params) {
+        return this._request('POST', '/exchange/v1/orders/create', params);
+    }
+
+    async createMultipleOrders(orders) {
+        return this._request('POST', '/exchange/v1/orders/create_multiple', { orders });
+    }
+
+    async getOrderStatus(id) {
+        return this._request('POST', '/exchange/v1/orders/status', { id });
+    }
+
+    async getOrderStatusMultiple(ids) {
+        return this._request('POST', '/exchange/v1/orders/status_multiple', { ids });
+    }
+
+    async getActiveOrders() {
+        return this._request('POST', '/exchange/v1/orders/active_orders', {});
+    }
+
+    async cancelOrder(id) {
+        return this._request('POST', '/exchange/v1/orders/cancel', { id });
+    }
+
+    async cancelAllOrders(side, market) {
+        return this._request('POST', '/exchange/v1/orders/cancel_all', { side, market });
+    }
+
+    async cancelOrdersByIds(ids) {
+        return this._request('POST', '/exchange/v1/orders/cancel_by_ids', { ids });
+    }
+
+    async editOrder(id, price) {
+        return this._request('POST', '/exchange/v1/orders/edit', { id, price });
+    }
+
+    async getSpotTradeHistory(market, limit = 50) {
+        return this._request('POST', '/exchange/v1/orders/trade_history', { market, limit });
+    }
+
+    // --- Authenticated Legacy Margin Trading ---
+
+    async createMarginOrder(params) {
+        return this._request('POST', '/exchange/v1/margin/create', params);
+    }
+
+    async cancelMarginOrder(id) {
+        return this._request('POST', '/exchange/v1/margin/cancel', { id });
+    }
+
+    async exitMarginPosition(id) {
+        return this._request('POST', '/exchange/v1/margin/exit', { id });
+    }
+
+    async editMarginTarget(id, target_price) {
+        return this._request('POST', '/exchange/v1/margin/edit_target', { id, target_price });
+    }
+
+    async editMarginPriceOfTargetOrder(id, price) {
+        return this._request('POST', '/exchange/v1/margin/edit_price_of_target_order', { id, price });
+    }
+
+    async editMarginSL(id, sl_price) {
+        return this._request('POST', '/exchange/v1/margin/edit_sl', { id, sl_price });
+    }
+
+    async editMarginTrailingSL(id, trailing_sl) {
+        return this._request('POST', '/exchange/v1/margin/edit_trailing_sl', { id, trailing_sl });
+    }
+
+    async addMargin(id, amount) {
+        return this._request('POST', '/exchange/v1/margin/add_margin', { id, amount });
+    }
+
+    async removeMargin(id, amount) {
+        return this._request('POST', '/exchange/v1/margin/remove_margin', { id, amount });
+    }
+
+    async fetchMarginOrders(params = {}) {
+        return this._request('POST', '/exchange/v1/margin/fetch_orders', params);
+    }
+
+    async getMarginOrder(id) {
+        return this._request('POST', '/exchange/v1/margin/order', { id });
+    }
+
+    // --- Authenticated Lending ---
+
+    async fetchLendOrders() {
+        return this._request('POST', '/exchange/v1/funding/fetch_orders', {});
+    }
+
+    async lend(currency, amount, side) {
+        return this._request('POST', '/exchange/v1/funding/lend', { currency, amount, side });
+    }
+
+    async settleLendOrder(id) {
+        return this._request('POST', '/exchange/v1/funding/settle', { id });
+    }
+
     // --- Authenticated Futures Trading ---
 
     async createFuturesOrder(params) {

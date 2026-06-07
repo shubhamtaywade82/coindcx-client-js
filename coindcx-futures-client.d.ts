@@ -91,6 +91,36 @@ export class CoinDCXFuturesClient extends EventEmitter {
     getSpotTradeHistory(pair: string, limit?: number): Promise<any[]>;
     getSpotOrderBook(pair: string): Promise<any>;
 
+    // Authenticated Spot Trading
+    createOrder(params: any): Promise<any>;
+    createMultipleOrders(orders: any[]): Promise<any>;
+    getOrderStatus(id: string | number): Promise<any>;
+    getOrderStatusMultiple(ids: (string | number)[]): Promise<any>;
+    getActiveOrders(): Promise<any[]>;
+    cancelOrder(id: string | number): Promise<any>;
+    cancelAllOrders(side?: string, market?: string): Promise<any>;
+    cancelOrdersByIds(ids: (string | number)[]): Promise<any>;
+    editOrder(id: string | number, price: number): Promise<any>;
+    getSpotTradeHistory(market: string, limit?: number): Promise<any[]>;
+
+    // Authenticated Legacy Margin Trading
+    createMarginOrder(params: any): Promise<any>;
+    cancelMarginOrder(id: string | number): Promise<any>;
+    exitMarginPosition(id: string | number): Promise<any>;
+    editMarginTarget(id: string | number, target_price: number): Promise<any>;
+    editMarginPriceOfTargetOrder(id: string | number, price: number): Promise<any>;
+    editMarginSL(id: string | number, sl_price: number): Promise<any>;
+    editMarginTrailingSL(id: string | number, trailing_sl: any): Promise<any>;
+    addMargin(id: string | number, amount: number): Promise<any>;
+    removeMargin(id: string | number, amount: number): Promise<any>;
+    fetchMarginOrders(params?: any): Promise<any[]>;
+    getMarginOrder(id: string | number): Promise<any>;
+
+    // Authenticated Lending
+    fetchLendOrders(): Promise<any[]>;
+    lend(currency: string, amount: number, side: string): Promise<any>;
+    settleLendOrder(id: string | number): Promise<any>;
+
     // Authenticated Futures Trading
     createFuturesOrder(params: any): Promise<any>;
     listFuturesOrders(filters?: any): Promise<any>;

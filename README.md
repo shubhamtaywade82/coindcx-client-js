@@ -10,11 +10,32 @@ npm install socket.io-client@2.4.0 axios
 
 ## Features
 
-- **REST API Support**: Comprehensive coverage of public and authenticated futures endpoints.
+- **REST API Support**: Comprehensive coverage of Futures, Spot, Legacy Margin, and Lending endpoints.
 - **WebSocket Support**: Real-time market data and account updates using Socket.IO v2.4.0.
 - **Authentication**: HMAC-SHA256 signing for secure requests.
 - **Normalization**: Standardized response formats for candles, order books, and trades.
 - **TypeScript Definitions**: Full type support included.
+
+## Feature Categories
+
+### Futures Trading
+- Market/Limit/Stop/Take-Profit orders.
+- Leverage and Margin management.
+- Position tracking and transaction history.
+
+### Spot Trading
+- Create/Cancel/Edit orders.
+- Batch order operations.
+- Open orders and trade history.
+
+### Legacy Margin & Lending
+- Support for legacy margin operations.
+- Lend funds and manage lending orders.
+
+### Wallet & Account
+- Multi-wallet support (Spot, Margin, Futures).
+- Sub-account transfers.
+- Detailed balance and account info.
 
 ## Authentication
 
