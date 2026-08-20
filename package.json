@@ -1,42 +1,53 @@
 {
-  "name": "coindcx-client-js",
+  "name": "coindcx-sdk",
   "version": "1.0.0",
-  "description": "Comprehensive Node.js SDK for CoinDCX API supporting Futures, Spot, Margin, and Lending with WebSocket (Socket.IO) integration.",
-  "main": "coindcx-futures-client.js",
-  "types": "coindcx-futures-client.d.ts",
+  "description": "Strictly typed TypeScript SDK for CoinDCX Spot, Margin, and Futures trading with Socket.IO WebSocket support and local paper engine",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist"
+  ],
   "scripts": {
-    "test": "echo \"Error: no test specified\" && exit 1",
-    "docs": "jsdoc coindcx-futures-client.js -d docs/api -R README.md",
-    "check": "node -c coindcx-futures-client.js"
+    "build": "tsc",
+    "dev": "tsc --watch",
+    "lint": "eslint src --ext .ts",
+    "test": "jest",
+    "prepublishOnly": "npm run build"
   },
   "keywords": [
     "coindcx",
     "crypto",
     "futures",
+    "spot",
+    "margin",
     "trading",
     "sdk",
-    "node",
+    "typescript",
     "websocket",
     "socket.io",
-    "bitcoin",
-    "binance"
+    "paper-trading"
   ],
-  "repository": {
-    "type": "git",
-    "url": "git+https://github.com/shubhamtaywade82/coindcx-client-js.git"
-  },
-  "author": "Shubham Taywade",
+  "author": "",
   "license": "ISC",
-  "bugs": {
-    "url": "https://github.com/shubhamtaywade82/coindcx-client-js/issues"
-  },
-  "homepage": "https://github.com/shubhamtaywade82/coindcx-client-js#readme",
   "dependencies": {
-    "axios": "^1.17.0",
-    "dotenv": "^17.4.2",
-    "socket.io-client": "^2.4.0"
+    "axios": "^1.6.0",
+    "socket.io-client": "^4.7.2",
+    "eventemitter3": "^5.0.1",
+    "zod": "^3.22.4"
   },
   "devDependencies": {
-    "jsdoc": "^4.0.5"
+    "@types/node": "^20.10.0",
+    "typescript": "^5.3.0",
+    "eslint": "^8.55.0",
+    "@typescript-eslint/eslint-plugin": "^6.13.0",
+    "@typescript-eslint/parser": "^6.13.0",
+    "jest": "^29.7.0",
+    "ts-jest": "^29.1.1",
+    "@types/jest": "^29.5.11",
+    "nock": "^13.4.0",
+    "@types/nock": "^11.1.0",
+    "@pollyjs/core": "^6.0.6",
+    "@pollyjs/adapter-node-http": "^6.0.6",
+    "@pollyjs/persister-fs": "^6.0.6"
   }
 }
