@@ -70,3 +70,8 @@ afterEach(() => {
 });
 
 export { nock };
+
+// Helper for recording with PollyJS v6
+export async function recordCassette(name: string, fn: () => Promise<void>) {
+  await polly.record(name, fn);
+}
