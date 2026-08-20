@@ -155,8 +155,8 @@ export class PaperTradingEngine extends EventEmitter {
     return this.toOrderResponse(order);
   }
 
-  async cancelOrder(orderId: string): Promise<boolean> {
-    const order = this.orders.get(orderId);
+  async cancelOrder(orderId: string | number): Promise<boolean> {
+    const order = this.orders.get(String(orderId));
     if (!order) return false;
 
     if (order.status === 'filled' || order.status === 'cancelled') {
@@ -173,8 +173,8 @@ export class PaperTradingEngine extends EventEmitter {
     return true;
   }
 
-  getOrder(orderId: string): PaperOrder | undefined {
-    return this.orders.get(orderId);
+  getOrder(orderId: string | number): PaperOrder | undefined {
+    return this.orders.get(String(orderId));
   }
 
   getOrders(): PaperOrder[] {

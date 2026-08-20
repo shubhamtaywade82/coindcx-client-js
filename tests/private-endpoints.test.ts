@@ -149,7 +149,7 @@ describe('CoinDCX SDK - Private Endpoints (Webmocks)', () => {
 
       const positions = await client.futures.trading.getPositions();
       expect(positions.length).toBe(1);
-      expect(positions[0].side).toBe('long');
+      expect(positions[0]?.side).toBe('long');
     });
 
     it('should update leverage for a pair', async () => {
@@ -188,7 +188,7 @@ describe('CoinDCX SDK - Private Endpoints (Webmocks)', () => {
       mockPrivateEndpoint('get', '/exchange/v1/derivatives/futures/wallets', mockResponse);
 
       const wallet = await client.futures.account.getWallet();
-      expect(wallet[0].currency).toBe('USDT');
+      expect(wallet[0]?.currency).toBe('USDT');
     });
   });
 });
