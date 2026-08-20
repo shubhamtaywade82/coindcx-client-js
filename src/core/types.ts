@@ -81,7 +81,14 @@ export interface CoinDCXClientOptions {
   slippage?: number;
   debug?: boolean;
   recvWindow?: number;
+  /** Max retries for idempotent GET requests that fail with a retryable status. Default 2. */
   maxRetries?: number;
+  /** Base backoff delay for retries in ms. Default 1000. */
+  retryBaseDelayMs?: number;
+  /** Upper bound for the backoff delay in ms. Default 30_000. */
+  retryMaxDelayMs?: number;
+  /** Backoff multiplier per attempt. Default 2. */
+  retryFactor?: number;
   rateLimitWindow?: number;
   maxRequestsPerWindow?: number;
   binanceClient?: any;
@@ -96,6 +103,10 @@ export interface RestClientOptions {
   publicApiBase?: string;
   paperMode?: boolean;
   paperEngineHandler?: (config: any) => Promise<any>;
+  maxRetries?: number;
+  retryBaseDelayMs?: number;
+  retryMaxDelayMs?: number;
+  retryFactor?: number;
 }
 
 export interface WsClientOptions {

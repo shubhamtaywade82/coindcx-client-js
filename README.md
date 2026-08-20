@@ -1,84 +1,146 @@
-# CoinDCX SDK for Node.js
+# coindcx-sdk
 
-A comprehensive, production-hardened SDK for the CoinDCX API (Version 2.3.0), supporting Futures, Spot, Margin, and Lending.
+TypeScript SDK for **CoinDCX** — Spot, Margin and **USD-margined Futures**, REST + Socket.IO
+WebSocket, with zod-validated typed responses, a local paper-trading engine, risk ops
+(position sizing, bracket orders, account snapshots) and LLM/MCP toolkits for trading agents.
 
-## Key Features
+Canonical CoinDCX client for the `trading-workspace` `sdk/` directory (mirrors
+`sdk/binance-sdk`'s role for Binance and `sdk/dhanhq-sdk`'s role for DhanHQ).
 
-- **Full Documentation Parity**: Implements all useful endpoints from the official CoinDCX JS documentation.
-- **Production Hardened**: 
-  - Internal **Token Bucket Rate Limiter** to prevent IP bans.
-  - **Exponential Backoff with Jitter** for resilient WebSocket reconnections.
-  - **Custom Error Hierarchy** (`CoinDCXAPIError`, `CoinDCXNetworkError`) for intelligent bot logic.
-- **WebSocket support**: real-time market data and private account updates (Socket.IO v2.4.0).
-- **Authentication**: Automatic HMAC-SHA256 signing and safe timestamp injection.
-- **Unified Interface**: One class for REST + Spot/Futures WebSocket.
-
-## Installation
+## Install
 
 ```bash
-npm install coindcx-client-js
+npm install @nemesis-oss/coindcx-sdk
 ```
 
-## Feature Categories
+## Usage
 
-### 1. Futures (Derivatives)
-- **Trading**: Market/Limit/TPSL orders, Bracket orders.
-- **Risk**: Leverage updates (up to 20x), Margin type changes (Isolated/Cross), Liquidation calculation.
-- **Positions**: Active position tracking, real-time PnL, automated market-exit.
+```typescript
+import { CoinDCXClient } from '@nemesis-oss/coindcx-sdk';
 
-### 2. Spot Trading
-- Create, Cancel, and Edit orders (Single & Multiple).
-- Open orders count and full trade history.
-- **WebSocket**: Support for real-time Spot candles, trades, and prices.
-
-### 3. Margin & Lending
-- Legacy margin order management.
-- Lending (Funding) operations and settlement.
-
-### 4. Wallet & Transfers
-- Sub-account capital allocation.
-- Internal transfers between Spot and Futures wallets.
-- Detailed balance snapshots.
-
-## Documentation
-
-### IDE Support (IntelliSense)
-The library is fully documented with **JSDoc**. You will get instant parameter descriptions and type hints directly in your IDE.
-
-### API Reference
-Generate a searchable HTML reference:
-```bash
-npm run docs
-```
-
-## Quick Start
-
-```javascript
-require('dotenv').config();
-const { CoinDCXFuturesClient } = require('./coindcx-futures-client');
-
-const client = new CoinDCXFuturesClient({
-  apiKey: process.env.COINDCX_API_KEY,
-  apiSecret: process.env.COINDCX_API_SECRET,
-  debug: true
+const client = new CoinDCXClient({
+  apiKey: 'YOUR_API_KEY',     // only needed for authenticated endpoints
+  apiSecret: 'YOUR_API_SECRET',
 });
 
-async function main() {
-  // REST: Fetch live USDS-M instruments
-  const instruments = await client.getActiveInstruments();
+// Public market data (no keys needed)
+const instruments = await client.futures.market.getActiveInstruments('USDT');
+const candles = await client.futures.market.getCandles('B-SOL_USDT', '15m', 200);
+const tickers = await client.futures.market.getTicker();
+const orderbook = await client.futures.market.getOrderBook('B-BTC_USDT');
 
-  // WS: Connect and stream real-time BTC data
-  await client.wsConnect();
-  client.wsSubscribeCandles('B-BTC_USDT', '1m'); // Futures
-  client.wsSubscribeSpotCandles('I-BTC_INR', '1m'); // Spot
-  
-  client.on('ws:candlestick', (data) => {
-    console.log(`${data.pair} Price: ${data.close}`);
-  });
-}
+// Authenticated account
+const wallet = await client.futures.account.getWallet();
+const positions = await client.futures.account.getPositions();
 
-main();
+// Trading
+const order = await client.futures.trading.createOrder({
+  side: 'buy',
+  order_type: 'limit_order',
+  base_currency: 'SOL',
+  quote_currency: 'USDT',
+  target_quantity: 1,
+  price: 120,
+  leverage: 10,
+  margin_type: 'isolated',
+});
+
+// Composite ops — sizing and rounding handled for you
+const sizing = await client.ops.sizing.calculatePositionSize({
+  accountBalance: 10000,
+  riskPercent: 2,
+  entryPrice: 120,
+  stopLossPrice: 115,
+  leverage: 10,
+});
+await client.ops.bracket.placeBracketOrder({
+  pair: 'B-SOL_USDT',
+  side: 'buy',
+  quantity: sizing.quantity,
+  stopLoss: 115,
+  takeProfit: 135,
+});
+const snapshot = await client.ops.snapshot.getAccountOverview();
 ```
+
+### Paper trading
+
+Every trading/positions call can run against an in-memory simulator instead of the
+exchange — nothing is ever sent to CoinDCX:
+
+```typescript
+const paper = new CoinDCXClient({ paperMode: true, initialBalance: 10000 });
+await paper.futures.trading.createOrder({
+  side: 'buy', order_type: 'market_order',
+  base_currency: 'SOL', quote_currency: 'USDT',
+  target_quantity: 1, price: 120, leverage: 10, margin_type: 'isolated',
+});
+console.log(paper.paper.getAccount()); // fills at live mark, fees + slippage applied
+```
+
+### WebSocket
+
+```typescript
+await client.connectWebsocket();
+client.publicStreams.on('candle', (pair, candle) => console.log(pair, candle));
+client.publicStreams.on('trade', (trade) => console.log(trade));
+client.subscribePrivateStreams();
+client.privateStreams.on('orderUpdate', (update) => console.log(update));
+client.privateStreams.on('positionUpdate', (update) => console.log(update));
+client.disconnect();
+```
+
+### MCP / LLM toolkits
+
+Zod-free JSON-Schema toolkits ready for OpenAI, Anthropic, or MCP hosts:
+
+```typescript
+import { createAllToolkits, toOpenAITool, toToolList } from '@nemesis-oss/coindcx-sdk/mcp';
+
+const tools = createAllToolkits(client);
+const openaiTools = toToolList(tools, 'openai'); // or 'anthropic' | 'mcp'
+```
+
+## Pair format
+
+CoinDCX uses exchange-prefixed pairs: `B-BTC_USDT` (futures), `BTC_USDT` (spot market).
+Helpers are provided:
+
+```typescript
+CoinDCXClient.buildPair('BTC', 'USDT');               // 'B-BTC_USDT'
+CoinDCXClient.parsePair('B-SOL_USDT');                // { ecode: 'B', base: 'SOL', target: 'USDT' }
+CoinDCXClient.calculateLiquidationPrice(60000, 10, 'buy'); // approximate liq price
+```
+
+## Reliability
+
+- **Rate limiting** — per-endpoint token buckets prevent IP bans; status via `client.getRateLimitStatus()`.
+- **Retries** — idempotent GETs retry on 429/5xx/network errors with exponential backoff
+  (`retry-after` honored, capped). Writes (POST/DELETE) are **never retried automatically**,
+  so a timed-out order can't be double-submitted. Tune with `maxRetries`, `retryBaseDelayMs`,
+  `retryMaxDelayMs`, `retryFactor` or `client.configureRetry(...)`.
+- **Errors** — typed hierarchy: `CoinDCXError` → `CoinDCXAPIError`,
+  `CoinDCXNetworkError`, `CoinDCXRateLimitError`, `CoinDCXAuthenticationError`,
+  `CoinDCXValidationError`, `CoinDCXInsufficientMarginError`, `CoinDCXInvalidPairError`,
+  `CoinDCXOrderError`, `CoinDCXWebSocketError`. Guards: `isRetryableError`, `isRateLimitError`,
+  `isAuthenticationError`, `isInsufficientMarginError`.
+- **WebSocket** — auto-reconnect with exponential backoff + jitter.
+
+## Development
+
+```bash
+npm run build       # tsup: ESM + CJS + .d.ts
+npm run typecheck   # tsc --noEmit
+npm run lint        # eslint
+npm test            # jest (nock + recorded HAR cassettes)
+npm run verify      # typecheck + lint + test + build + check:types
+npm run check:types # @arethetypeswrong: validates published exports
+```
+
+## Package entry points
+
+- `@nemesis-oss/coindcx-sdk` — full SDK (REST, WS, ops, paper engine)
+- `@nemesis-oss/coindcx-sdk/mcp` — toolkits + format converters only
 
 ## License
 

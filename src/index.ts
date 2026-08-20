@@ -54,6 +54,10 @@ export class CoinDCXClient {
       baseUrl: options.baseUrl ?? undefined,
       paperMode: this.paperMode,
       paperEngineHandler: this.paperEngineHandler ?? this.handlePaperRequest,
+      maxRetries: options.maxRetries,
+      retryBaseDelayMs: options.retryBaseDelayMs,
+      retryMaxDelayMs: options.retryMaxDelayMs,
+      retryFactor: options.retryFactor,
     };
 
     this.spot = new SpotApi(restOptions);
@@ -86,7 +90,7 @@ export class CoinDCXClient {
 
   private handlePaperRequest = async (config: any): Promise<any> => {
     const url: string = config.url || '';
-    const data: any = config.data || {};
+    const data: any = config.data ?? config.params ?? {};
 
     let payload: any;
     if (url.includes('/orders/create')) {
@@ -145,6 +149,19 @@ export class CoinDCXClient {
 
   getRateLimitStatus(): Record<string, number> {
     return this.futures.trading.getRateLimitStatus();
+  }
+
+  getRetryConfig() {
+    return this.futures.trading.getRetryConfig();
+  }
+
+  configureRetry(options: {
+    maxRetries?: number;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    factor?: number;
+  }): void {
+    this.futures.trading.configureRetry(options);
   }
 
   disconnect(): void {

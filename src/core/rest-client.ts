@@ -11,8 +11,17 @@ import {
   CoinDCXInsufficientMarginError,
   CoinDCXInvalidPairError,
   CoinDCXOrderError,
+  isRetryableError,
 } from './errors';
 import { defaultLogger } from '../logger';
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function isPaperHandledEndpoint(endpoint: string): boolean {
+  return endpoint.includes('/orders') || endpoint.includes('/positions');
+}
 
 export class RestClient {
   protected axiosInstance: AxiosInstance;
@@ -22,12 +31,20 @@ export class RestClient {
   protected paperEngineHandler: ((config: InternalAxiosRequestConfig) => Promise<any>) | undefined;
   protected rateLimiters: Map<string, TokenBucket> = new Map();
   protected logger = defaultLogger.child('RestClient');
+  protected maxRetries: number;
+  protected retryBaseDelayMs: number;
+  protected retryMaxDelayMs: number;
+  protected retryFactor: number;
 
   constructor(options: RestClientOptions = {}) {
     this.apiKey = options.apiKey ?? undefined;
     this.apiSecret = options.apiSecret ?? undefined;
     this.paperMode = options.paperMode ?? false;
     this.paperEngineHandler = options.paperEngineHandler;
+    this.maxRetries = options.maxRetries ?? 2;
+    this.retryBaseDelayMs = options.retryBaseDelayMs ?? 1000;
+    this.retryMaxDelayMs = options.retryMaxDelayMs ?? 30_000;
+    this.retryFactor = options.retryFactor ?? 2;
 
     this.axiosInstance = axios.create({
       baseURL: options.baseUrl || 'https://api.coindcx.com',
@@ -45,7 +62,7 @@ export class RestClient {
 
   private async paperAdapter(config: InternalAxiosRequestConfig): Promise<AxiosResponse> {
     const endpoint = config.url || '';
-    if (this.paperMode && this.paperEngineHandler && (endpoint.includes('/orders') || endpoint.includes('/positions'))) {
+    if (this.paperMode && this.paperEngineHandler && isPaperHandledEndpoint(endpoint)) {
       return this.paperEngineHandler(config);
     }
     return this.httpAdapter(config);
@@ -101,7 +118,8 @@ export class RestClient {
           const code = (data as any)?.code;
 
           if (status === 429) {
-            const retryAfter = Number(error.response.headers['retry-after']) || 60;
+            const header = Number(error.response.headers['retry-after']);
+            const retryAfter = Number.isFinite(header) && header >= 0 ? header : 60;
             throw new CoinDCXRateLimitError(message, status, data, method, url, retryAfter);
           }
           if (status === 401 || status === 403) {
@@ -136,33 +154,43 @@ export class RestClient {
     endpoint: string,
     data: Record<string, any> = {}
   ): Promise<T> {
-    if (!this.apiKey || !this.apiSecret) {
-      throw new Error('API Key and Secret required for signed requests');
-    }
+    return this.runWithRetry(method, async () => {
+      const paperHandled = this.paperMode && this.paperEngineHandler && isPaperHandledEndpoint(endpoint);
+      if (!paperHandled && (!this.apiKey || !this.apiSecret)) {
+        throw new Error('API Key and Secret required for signed requests');
+      }
 
-    const timestamp = Math.floor(Date.now() / 1000).toString();
-    const payload = { ...data, timestamp };
-    const payloadStr = JSON.stringify(payload);
-    const signature = this.sign(payloadStr);
+      const config: AxiosRequestConfig = {
+        method,
+        url: endpoint,
+      };
 
-    const config: AxiosRequestConfig = {
-      method,
-      url: endpoint,
-      headers: {
-        'X-AUTH-APIKEY': this.apiKey,
-        'X-AUTH-SIGNATURE': signature,
-      },
-    };
+      if (!paperHandled) {
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        const payload = { ...data, timestamp };
+        const payloadStr = JSON.stringify(payload);
+        const signature = this.sign(payloadStr);
+        config.headers = {
+          'X-AUTH-APIKEY': this.apiKey,
+          'X-AUTH-SIGNATURE': signature,
+        };
+        if (method === 'GET') {
+          config.params = payload;
+        } else {
+          config.data = payload;
+        }
+      } else {
+        if (method === 'GET') {
+          config.params = data;
+        } else {
+          config.data = data;
+        }
+      }
 
-    if (method === 'GET') {
-      config.params = payload;
-    } else {
-      config.data = payload;
-    }
-
-    this.logger.debug(`${method} ${endpoint}`, data);
-    const response = await this.axiosInstance.request<T>(config);
-    return response.data;
+      this.logger.debug(`${method} ${endpoint}`, data);
+      const response = await this.axiosInstance.request<T>(config);
+      return response.data;
+    });
   }
 
   protected async unsignedRequest<T>(
@@ -171,24 +199,72 @@ export class RestClient {
     data: Record<string, any> = {},
     usePublicBase: boolean = false
   ): Promise<T> {
-    const config: AxiosRequestConfig = {
-      method,
-      url: endpoint,
+    return this.runWithRetry(method, async () => {
+      const config: AxiosRequestConfig = {
+        method,
+        url: endpoint,
+      };
+
+      if (usePublicBase) {
+        config.baseURL = 'https://public.coindcx.com';
+      }
+
+      if (method === 'GET') {
+        config.params = data;
+      } else {
+        config.data = data;
+      }
+
+      this.logger.debug(`${method} ${endpoint}`, data);
+      const response = await this.axiosInstance.request<T>(config);
+      return response.data;
+    });
+  }
+
+  /**
+   * Re-runs an idempotent request with exponential backoff on retryable errors.
+   * Only GET is retried: re-sending a signed POST could double-submit an order,
+   * so write paths always fail fast and surface the original error.
+   */
+  private async runWithRetry<T>(method: string, run: () => Promise<T>): Promise<T> {
+    const maxRetries = method === 'GET' ? this.maxRetries : 0;
+    let attempt = 0;
+    for (;;) {
+      try {
+        return await run();
+      } catch (error) {
+        if (attempt >= maxRetries || !isRetryableError(error)) throw error;
+        await this.retryDelay(error, attempt);
+        attempt += 1;
+      }
+    }
+  }
+
+  private async retryDelay(error: unknown, attempt: number): Promise<void> {
+    const backoff = this.retryBaseDelayMs * Math.pow(this.retryFactor, attempt);
+    const retryAfter = error instanceof CoinDCXRateLimitError ? error.retryAfter * 1000 : 0;
+    await sleep(Math.min(Math.max(backoff, retryAfter), this.retryMaxDelayMs));
+  }
+
+  getRetryConfig(): { maxRetries: number; baseDelayMs: number; maxDelayMs: number; factor: number } {
+    return {
+      maxRetries: this.maxRetries,
+      baseDelayMs: this.retryBaseDelayMs,
+      maxDelayMs: this.retryMaxDelayMs,
+      factor: this.retryFactor,
     };
+  }
 
-    if (usePublicBase) {
-      config.baseURL = 'https://public.coindcx.com';
-    }
-
-    if (method === 'GET') {
-      config.params = data;
-    } else {
-      config.data = data;
-    }
-
-    this.logger.debug(`${method} ${endpoint}`, data);
-    const response = await this.axiosInstance.request<T>(config);
-    return response.data;
+  configureRetry(options: {
+    maxRetries?: number;
+    baseDelayMs?: number;
+    maxDelayMs?: number;
+    factor?: number;
+  }): void {
+    if (options.maxRetries !== undefined) this.maxRetries = options.maxRetries;
+    if (options.baseDelayMs !== undefined) this.retryBaseDelayMs = options.baseDelayMs;
+    if (options.maxDelayMs !== undefined) this.retryMaxDelayMs = options.maxDelayMs;
+    if (options.factor !== undefined) this.retryFactor = options.factor;
   }
 
   setPaperMode(enabled: boolean, handler?: (config: InternalAxiosRequestConfig) => Promise<any>): void {
