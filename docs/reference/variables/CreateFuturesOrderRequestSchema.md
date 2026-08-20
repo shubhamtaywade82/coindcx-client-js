@@ -1,0 +1,11 @@
+[**@nemesis-oss/coindcx-sdk API Reference**](../index.md)
+
+***
+
+[@nemesis-oss/coindcx-sdk API Reference](../index.md) / CreateFuturesOrderRequestSchema
+
+# Variable: CreateFuturesOrderRequestSchema
+
+> `const` **CreateFuturesOrderRequestSchema**: `ZodObject`\<\{ `side`: `ZodEnum`\<\[`"buy"`, `"sell"`\]\>; `order_type`: `ZodEnum`\<\[`"market_order"`, `"limit_order"`, `"stop_limit_order"`\]\>; `base_currency`: `ZodString`; `quote_currency`: `ZodString`; `target_quantity`: `ZodEffects`\<`ZodUnion`\<\[`ZodNumber`, `ZodString`\]\>, `number`, `string` \| `number`\>; `price`: `ZodOptional`\<`ZodEffects`\<`ZodUnion`\<\[`ZodNumber`, `ZodString`\]\>, `number`, `string` \| `number`\>\>; `leverage`: `ZodOptional`\<`ZodNumber`\>; `client_order_id`: `ZodOptional`\<`ZodString`\>; `time_in_force`: `ZodOptional`\<`ZodEnum`\<\[`"gtc"`, `"ioc"`, `"fok"`, `"post_only"`\]\>\>; `stop_loss`: `ZodOptional`\<`ZodEffects`\<`ZodUnion`\<\[`ZodNumber`, `ZodString`\]\>, `number`, `string` \| `number`\>\>; `take_profit`: `ZodOptional`\<`ZodEffects`\<`ZodUnion`\<\[`ZodNumber`, `ZodString`\]\>, `number`, `string` \| `number`\>\>; `margin_type`: `ZodOptional`\<`ZodEnum`\<\[`"isolated"`, `"cross"`\]\>\>; \}, `"strip"`, `ZodTypeAny`, \{ `side`: `"buy"` \| `"sell"`; `order_type`: `"market_order"` \| `"limit_order"` \| `"stop_limit_order"`; `base_currency`: `string`; `quote_currency`: `string`; `target_quantity`: `number`; `price?`: `number`; `leverage?`: `number`; `client_order_id?`: `string`; `time_in_force?`: `"gtc"` \| `"ioc"` \| `"fok"` \| `"post_only"`; `stop_loss?`: `number`; `take_profit?`: `number`; `margin_type?`: `"isolated"` \| `"cross"`; \}, \{ `side`: `"buy"` \| `"sell"`; `order_type`: `"market_order"` \| `"limit_order"` \| `"stop_limit_order"`; `base_currency`: `string`; `quote_currency`: `string`; `target_quantity`: `string` \| `number`; `price?`: `string` \| `number`; `leverage?`: `number`; `client_order_id?`: `string`; `time_in_force?`: `"gtc"` \| `"ioc"` \| `"fok"` \| `"post_only"`; `stop_loss?`: `string` \| `number`; `take_profit?`: `string` \| `number`; `margin_type?`: `"isolated"` \| `"cross"`; \}\>
+
+Defined in: [core/schemas.ts:29](https://github.com/shubhamtaywade82/coindcx-sdk/blob/ed817fac7b96aa51708606280e2193d6f691e34f/src/core/schemas.ts#L29)

@@ -1,0 +1,11 @@
+[**@nemesis-oss/coindcx-sdk API Reference**](../index.md)
+
+***
+
+[@nemesis-oss/coindcx-sdk API Reference](../index.md) / PositionSchema
+
+# Variable: PositionSchema
+
+> `const` **PositionSchema**: `ZodObject`\<\{ `id`: `ZodUnion`\<\[`ZodString`, `ZodNumber`\]\>; `pair`: `ZodString`; `side`: `ZodEnum`\<\[`"long"`, `"short"`\]\>; `size`: `ZodUnion`\<\[`ZodNumber`, `ZodEffects`\<`ZodString`, `number`, `string`\>\]\>; `entry_price`: `ZodUnion`\<\[`ZodNumber`, `ZodEffects`\<`ZodString`, `number`, `string`\>\]\>; `mark_price`: `ZodOptional`\<`ZodUnion`\<\[`ZodNumber`, `ZodEffects`\<`ZodString`, `number`, `string`\>\]\>\>; `liquidation_price`: `ZodOptional`\<`ZodNullable`\<`ZodUnion`\<\[`ZodNumber`, `ZodEffects`\<`ZodString`, `number`, `string`\>\]\>\>\>; `unrealized_pnl`: `ZodOptional`\<`ZodUnion`\<\[`ZodNumber`, `ZodEffects`\<`ZodString`, `number`, `string`\>\]\>\>; `realized_pnl`: `ZodOptional`\<`ZodUnion`\<\[`ZodNumber`, `ZodEffects`\<`ZodString`, `number`, `string`\>\]\>\>; `leverage`: `ZodOptional`\<`ZodNumber`\>; `margin_type`: `ZodOptional`\<`ZodEnum`\<\[`"isolated"`, `"cross"`\]\>\>; `margin`: `ZodOptional`\<`ZodUnion`\<\[`ZodNumber`, `ZodEffects`\<`ZodString`, `number`, `string`\>\]\>\>; `timestamp`: `ZodOptional`\<`ZodNumber`\>; \}, `"strip"`, `ZodTypeAny`, \{ `id`: `string` \| `number`; `pair`: `string`; `side`: `"long"` \| `"short"`; `size`: `number`; `entry_price`: `number`; `mark_price?`: `number`; `liquidation_price?`: `number` \| `null`; `unrealized_pnl?`: `number`; `realized_pnl?`: `number`; `leverage?`: `number`; `margin_type?`: `"isolated"` \| `"cross"`; `margin?`: `number`; `timestamp?`: `number`; \}, \{ `id`: `string` \| `number`; `pair`: `string`; `side`: `"long"` \| `"short"`; `size`: `string` \| `number`; `entry_price`: `string` \| `number`; `mark_price?`: `string` \| `number`; `liquidation_price?`: `string` \| `number` \| `null`; `unrealized_pnl?`: `string` \| `number`; `realized_pnl?`: `string` \| `number`; `leverage?`: `number`; `margin_type?`: `"isolated"` \| `"cross"`; `margin?`: `string` \| `number`; `timestamp?`: `number`; \}\>
+
+Defined in: [core/schemas.ts:96](https://github.com/shubhamtaywade82/coindcx-sdk/blob/ed817fac7b96aa51708606280e2193d6f691e34f/src/core/schemas.ts#L96)

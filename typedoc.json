@@ -1,0 +1,14 @@
+{
+  "$schema": "https://typedoc.org/schema.json",
+  "entryPoints": ["src/index.ts"],
+  "name": "@nemesis-oss/coindcx-sdk API Reference",
+  "out": "docs/reference",
+  "plugin": ["typedoc-plugin-markdown"],
+  "exclude": ["**/*.test.ts", "**/examples/**", "**/scripts/**"],
+  "excludeExternals": true,
+  "excludeInternal": true,
+  "readme": "none",
+  "entryFileName": "index",
+  "hideGenerator": true,
+  "sort": ["source-order"]
+}
