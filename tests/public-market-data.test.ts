@@ -23,7 +23,6 @@ async function recordCassette(name: string, fn: () => Promise<void>) {
       },
     },
   });
-  testPolly.record();
   try {
     await fn();
   } finally {
