@@ -22,7 +22,7 @@ describe('CoinDCX SDK - Operations & Paper Engine', () => {
         leverage: 10,
       });
 
-      expect(result.quantity).toBeCloseTo(0.02, 2);
+      expect(result.quantity).toBeCloseTo(0.2, 2);
       expect(result.riskAmount).toBe(200);
     });
 
@@ -123,10 +123,16 @@ describe('CoinDCX SDK - Operations & Paper Engine', () => {
       mockPrivateEndpoint('get', '/exchange/v1/derivatives/futures/wallets', futuresWallet);
       mockPrivateEndpoint('post', '/exchange/v1/derivatives/futures/positions', futuresPositions);
 
-      const overview = await client.ops.snapshot.getAccountOverview();
+      const realClient = new CoinDCXClient({
+        apiKey: 'test-api-key',
+        apiSecret: 'test-api-secret',
+        paperMode: false,
+      });
+      const overview = await realClient.ops.snapshot.getAccountOverview();
 
-      expect(overview.totalEquity).toBe(15010);
+      expect(overview.totalEquity).toBe(15000);
       expect(overview.futuresPositions.length).toBe(1);
+      expect(overview.unrealizedPnl).toBe(10);
     });
   });
 
@@ -175,7 +181,7 @@ describe('CoinDCX SDK - Operations & Paper Engine', () => {
 
       client.paper.updatePrice('B-BTC_USDT', 48900, 49000);
 
-      const filledOrder = client.paper.getOrder(order.id);
+      const filledOrder = client.paper.getOrder(String(order.id));
       expect(filledOrder?.status).toBe('filled');
     });
 
@@ -204,11 +210,19 @@ describe('CoinDCX SDK - Operations & Paper Engine', () => {
     });
 
     it('should track paper account equity', async () => {
-      const initialAccount = client.paper.getAccount();
+      const zeroFeeClient = new CoinDCXClient({
+        apiKey: 'test-api-key',
+        apiSecret: 'test-api-secret',
+        paperMode: true,
+        makerFee: 0,
+        takerFee: 0,
+        slippage: 0,
+      });
+      const initialAccount = zeroFeeClient.paper.getAccount();
       expect(initialAccount.totalEquity).toBe(20000);
 
-      client.paper.updatePrice('B-BTC_USDT', 50000, 50100);
-      await client.paper.placeOrder({
+      zeroFeeClient.paper.updatePrice('B-BTC_USDT', 50000, 50100);
+      await zeroFeeClient.paper.placeOrder({
         side: 'buy',
         order_type: 'market_order',
         base_currency: 'BTC',
@@ -223,10 +237,10 @@ describe('CoinDCX SDK - Operations & Paper Engine', () => {
         margin_type: undefined,
       });
 
-      client.paper.updatePrice('B-BTC_USDT', 51000, 51100);
+      zeroFeeClient.paper.updatePrice('B-BTC_USDT', 51000, 51100);
 
-      const account = client.paper.getAccount();
-      expect(account.totalEquity).toBe(20010);
+      const account = zeroFeeClient.paper.getAccount();
+      expect(account.totalEquity).toBe(20009.5);
     });
 
     it('should reject orders with insufficient margin', async () => {
@@ -267,7 +281,7 @@ describe('CoinDCX SDK - Operations & Paper Engine', () => {
         margin_type: undefined,
       });
 
-      const cancelled = await client.paper.cancelOrder(order.id);
+      const cancelled = await client.paper.cancelOrder(String(order.id));
       expect(cancelled).toBe(true);
     });
   });

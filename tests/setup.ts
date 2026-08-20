@@ -1,27 +1,4 @@
-import { Polly } from '@pollyjs/core';
-import NodeHttpAdapter from '@pollyjs/adapter-node-http';
-import FSPersister from '@pollyjs/persister-fs';
 import nock from 'nock';
-
-Polly.register(NodeHttpAdapter);
-Polly.register(FSPersister);
-
-export const polly = new Polly('coindcx-sdk-tests', {
-  adapters: ['node-http'],
-  persister: 'fs',
-  persisterOptions: {
-    fs: {
-      recordingsDir: __dirname + '/fixtures/cassettes',
-    },
-  },
-  recordIfMissing: true,
-  recordFailedRequests: true,
-  matchRequestsBy: {
-    headers: {
-      exclude: ['authorization', 'x-auth-apikey', 'x-auth-signature', 'x-auth-timestamp'],
-    },
-  },
-});
 
 export function setupNock() {
   nock.disableNetConnect();
@@ -35,11 +12,11 @@ export function teardownNock() {
 }
 
 export function mockPublicEndpoint(method: 'get' | 'post', path: string, response: any, status = 200) {
-  return nock('https://public.coindcx.com')[method](path).reply(status, response);
+  return nock('https://public.coindcx.com')[method](path).query(true).reply(status, response);
 }
 
 export function mockPrivateEndpoint(method: 'get' | 'post', path: string, response: any, status = 200) {
-  return nock('https://api.coindcx.com')[method](path).reply(status, response);
+  return nock('https://api.coindcx.com')[method](path).query(true).reply(status, response);
 }
 
 export function mockWebSocket() {
@@ -58,41 +35,10 @@ beforeAll(() => {
 
 afterAll(() => {
   teardownNock();
-  return polly.stop();
 });
 
 beforeEach(() => {
   nock.cleanAll();
 });
 
-afterEach(() => {
-  return polly.flush();
-});
-
 export { nock };
-
-// Helper for recording with PollyJS v6
-export async function recordCassette(name: string, fn: () => Promise<void>) {
-  const testPolly = new Polly(name, {
-    adapters: ['node-http'],
-    persister: 'fs',
-    persisterOptions: {
-      fs: {
-        recordingsDir: __dirname + '/fixtures/cassettes',
-      },
-    },
-    recordIfMissing: true,
-    recordFailedRequests: true,
-    matchRequestsBy: {
-      headers: {
-        exclude: ['authorization', 'x-auth-apikey', 'x-auth-signature', 'x-auth-timestamp'],
-      },
-    },
-  });
-  testPolly.record();
-  try {
-    await fn();
-  } finally {
-    await testPolly.stop();
-  }
-}

@@ -1,4 +1,4 @@
-import axios, { AxiosInstance, AxiosRequestConfig, InternalAxiosRequestConfig, AxiosError } from 'axios';
+import axios, { AxiosInstance, AxiosRequestConfig, InternalAxiosRequestConfig, AxiosError, AxiosResponse } from 'axios';
 import crypto from 'crypto';
 import { TokenBucket, coinDcxRateLimits } from './rate-limiter';
 import { RestClientOptions } from './types';
@@ -36,10 +36,24 @@ export class RestClient {
         'User-Agent': 'CoinDCX-SDK/1.0.0',
       },
       timeout: 15000,
+      adapter: (config) => this.paperAdapter(config),
     });
 
     this.initializeRateLimiters();
     this.setupInterceptors();
+  }
+
+  private async paperAdapter(config: InternalAxiosRequestConfig): Promise<AxiosResponse> {
+    const endpoint = config.url || '';
+    if (this.paperMode && this.paperEngineHandler && (endpoint.includes('/orders') || endpoint.includes('/positions'))) {
+      return this.paperEngineHandler(config);
+    }
+    return this.httpAdapter(config);
+  }
+
+  private httpAdapter(config: InternalAxiosRequestConfig): Promise<AxiosResponse> {
+    const adapter = axios.getAdapter(['http', 'fetch']);
+    return adapter(config as any);
   }
 
   private initializeRateLimiters(): void {
@@ -72,11 +86,6 @@ export class RestClient {
       const endpoint = config.url || '';
       const limiter = this.getRateLimiter(endpoint);
       await limiter.consume(1);
-
-      if (this.paperMode && this.paperEngineHandler && (endpoint.includes('/orders') || endpoint.includes('/positions'))) {
-        return this.paperEngineHandler(config);
-      }
-
       return config;
     });
 

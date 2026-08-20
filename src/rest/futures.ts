@@ -112,11 +112,11 @@ export class FuturesApi extends RestClient {
   }
 
   async getWallet(): Promise<FuturesWalletResponse[]> {
-    return this.unsignedRequest('GET', '/exchange/v1/derivatives/futures/wallets', {}, true);
+    return this.signedRequest('GET', '/exchange/v1/derivatives/futures/wallets', {});
   }
 
   async getWalletTransactions(): Promise<FuturesWalletTransactionResponse[]> {
-    return this.unsignedRequest('GET', '/exchange/v1/derivatives/futures/wallets/transactions', {}, true);
+    return this.signedRequest('GET', '/exchange/v1/derivatives/futures/wallets/transactions', {});
   }
 
   async walletTransfer(params: {
@@ -128,7 +128,7 @@ export class FuturesApi extends RestClient {
   }
 
   async getActiveInstruments(marginCurrency = 'USDT'): Promise<string[]> {
-    return this.unsignedRequest('GET', '/exchange/v1/derivatives/futures/data/active_instruments', { margin_currency: marginCurrency }, true);
+    return this.unsignedRequest('GET', '/exchange/v1/derivatives/futures/data/active_instruments', { margin_currency: marginCurrency });
   }
 
   async getMarketsDetails(): Promise<InstrumentResponse[]> {

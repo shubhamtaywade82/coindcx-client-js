@@ -74,6 +74,11 @@ export interface CoinDCXClientOptions {
   wsUrl?: string;
   paperMode?: boolean;
   paperEngineHandler?: (config: any) => Promise<any>;
+  initialBalance?: number;
+  initialFuturesBalance?: number;
+  makerFee?: number;
+  takerFee?: number;
+  slippage?: number;
   debug?: boolean;
   recvWindow?: number;
   maxRetries?: number;

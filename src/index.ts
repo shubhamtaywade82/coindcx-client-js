@@ -39,12 +39,21 @@ export class CoinDCXClient {
     this.paperMode = options.paperMode ?? false;
     this.paperEngineHandler = options.paperEngineHandler;
 
+    this.paper = new PaperTradingEngine({
+      initialBalance: options.initialBalance ?? 10000,
+      initialFuturesBalance: options.initialFuturesBalance ?? options.initialBalance ?? 10000,
+      makerFee: options.makerFee,
+      takerFee: options.takerFee,
+      slippage: options.slippage,
+      binanceWs: options.binanceClient?.futures?.ws,
+    });
+
     const restOptions = {
       apiKey: options.apiKey ?? undefined,
       apiSecret: options.apiSecret ?? undefined,
       baseUrl: options.baseUrl ?? undefined,
       paperMode: this.paperMode,
-      paperEngineHandler: this.paperEngineHandler,
+      paperEngineHandler: this.paperEngineHandler ?? this.handlePaperRequest,
     };
 
     this.spot = new SpotApi(restOptions);
@@ -73,13 +82,49 @@ export class CoinDCXClient {
       bracket: new BracketOps(futuresApi),
       snapshot: new SnapshotOps(futuresApi, this.spot, this.marketData),
     };
-
-    this.paper = new PaperTradingEngine({
-      initialBalance: 10000,
-      initialFuturesBalance: 10000,
-      binanceWs: options.binanceClient?.futures?.ws,
-    });
   }
+
+  private handlePaperRequest = async (config: any): Promise<any> => {
+    const url: string = config.url || '';
+    const data: any = config.data || {};
+
+    let payload: any;
+    if (url.includes('/orders/create')) {
+      payload = await this.paper.placeOrder(data);
+    } else if (url.includes('/orders/details')) {
+      payload = this.paper.getOrder(String(data.id ?? data.order_id ?? ''));
+    } else if (url.includes('/orders/cancel_all')) {
+      payload = [];
+    } else if (url.includes('/orders/cancel')) {
+      payload = await this.paper.cancelOrder(String(data.id ?? data.order_id ?? ''));
+    } else if (url.includes('/orders/update') || url.includes('/orders/edit')) {
+      payload = this.paper.getOrder(String(data.id ?? data.order_id ?? ''));
+    } else if (url.includes('/orders')) {
+      payload = this.paper.getOrders();
+    } else if (url.includes('/positions/exit')) {
+      payload = [];
+    } else if (url.includes('/positions/close')) {
+      payload = [];
+    } else if (url.includes('/positions/create_tpsl')) {
+      payload = [];
+    } else if (url.includes('/positions/update_leverage')) {
+      payload = {};
+    } else if (url.includes('/positions')) {
+      payload = this.paper.getPositions();
+    } else if (url.includes('/wallets/transfer')) {
+      payload = { success: true };
+    } else {
+      payload = {};
+    }
+
+    return {
+      data: payload,
+      status: 200,
+      statusText: 'OK',
+      headers: { 'content-type': 'application/json' },
+      config,
+    };
+  };
 
   async connectWebsocket(): Promise<void> {
     await this.ws.connect();
