@@ -7,9 +7,6 @@ export enum OrderType {
   MARKET = 'market_order',
   LIMIT = 'limit_order',
   STOP_LIMIT = 'stop_limit_order',
-  MARKET_ORDER = 'market_order',
-  LIMIT_ORDER = 'limit_order',
-  STOP_LIMIT_ORDER = 'stop_limit_order',
 }
 
 export enum TimeInForce {

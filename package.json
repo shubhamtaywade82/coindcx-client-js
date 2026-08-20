@@ -1,5 +1,5 @@
 {
-  "name": "coindcx-sdk",
+  "name": "@nemesis-oss/coindcx-sdk",
   "version": "1.0.0",
   "description": "Strictly typed TypeScript SDK for CoinDCX Spot, Margin, and Futures trading with Socket.IO WebSocket support and local paper engine",
   "main": "dist/index.js",
@@ -13,6 +13,9 @@
     "lint": "eslint src --ext .ts",
     "test": "jest",
     "prepublishOnly": "npm run build"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "keywords": [
     "coindcx",
