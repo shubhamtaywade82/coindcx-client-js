@@ -73,5 +73,26 @@ export { nock };
 
 // Helper for recording with PollyJS v6
 export async function recordCassette(name: string, fn: () => Promise<void>) {
-  await polly.record(name, fn);
+  const testPolly = new Polly(name, {
+    adapters: ['node-http'],
+    persister: 'fs',
+    persisterOptions: {
+      fs: {
+        recordingsDir: __dirname + '/fixtures/cassettes',
+      },
+    },
+    recordIfMissing: true,
+    recordFailedRequests: true,
+    matchRequestsBy: {
+      headers: {
+        exclude: ['authorization', 'x-auth-apikey', 'x-auth-signature', 'x-auth-timestamp'],
+      },
+    },
+  });
+  testPolly.record();
+  try {
+    await fn();
+  } finally {
+    await testPolly.stop();
+  }
 }
