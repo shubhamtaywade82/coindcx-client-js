@@ -1,7 +1,11 @@
 export class CoinDCXError extends Error {
-  constructor(message: string) {
+  /** A human-readable hint for how to recover from this error, aimed at LLM/agent callers. */
+  public readonly suggestedAction: string | undefined;
+
+  constructor(message: string, suggestedAction?: string) {
     super(message);
     this.name = this.constructor.name;
+    this.suggestedAction = suggestedAction;
     Object.setPrototypeOf(this, CoinDCXError.prototype);
   }
 }
@@ -14,8 +18,16 @@ export class CoinDCXAPIError extends CoinDCXError {
   public readonly isRetryable: boolean;
   public readonly code: string | undefined;
 
-  constructor(message: string, status: number, data: any, method: string, url: string, code: string | undefined = undefined) {
-    super(message);
+  constructor(
+    message: string,
+    status: number,
+    data: any,
+    method: string,
+    url: string,
+    code: string | undefined = undefined,
+    suggestedAction?: string
+  ) {
+    super(message, suggestedAction);
     this.name = 'CoinDCXAPIError';
     this.status = status;
     this.data = data;
@@ -31,8 +43,12 @@ export class CoinDCXNetworkError extends CoinDCXError {
   public readonly originalError: Error;
   public readonly isRetryable = true;
 
-  constructor(message: string, originalError: Error) {
-    super(message);
+  constructor(
+    message: string,
+    originalError: Error,
+    suggestedAction = 'Check your internet connection and retry. The SDK will automatically retry idempotent requests.'
+  ) {
+    super(message, suggestedAction);
     this.name = 'CoinDCXNetworkError';
     this.originalError = originalError;
     Object.setPrototypeOf(this, CoinDCXNetworkError.prototype);
@@ -42,8 +58,25 @@ export class CoinDCXNetworkError extends CoinDCXError {
 export class CoinDCXRateLimitError extends CoinDCXAPIError {
   public readonly retryAfter: number;
 
-  constructor(message: string, status: number, data: any, method: string, url: string, retryAfter: number) {
-    super(message, status, data, method, url);
+  constructor(
+    message: string,
+    status: number,
+    data: any,
+    method: string,
+    url: string,
+    retryAfter: number,
+    suggestedAction?: string
+  ) {
+    super(
+      message,
+      status,
+      data,
+      method,
+      url,
+      undefined,
+      suggestedAction ??
+        `Wait ${retryAfter} second(s) before retrying. GET requests are retried automatically by the SDK; POST/DELETE requests must be retried manually after the delay.`
+    );
     this.name = 'CoinDCXRateLimitError';
     this.retryAfter = retryAfter;
     Object.setPrototypeOf(this, CoinDCXRateLimitError.prototype);
@@ -51,40 +84,78 @@ export class CoinDCXRateLimitError extends CoinDCXAPIError {
 }
 
 export class CoinDCXAuthenticationError extends CoinDCXAPIError {
-  constructor(message: string, status: number, data: any, method: string, url: string) {
-    super(message, status, data, method, url);
+  constructor(message: string, status: number, data: any, method: string, url: string, suggestedAction?: string) {
+    super(
+      message,
+      status,
+      data,
+      method,
+      url,
+      undefined,
+      suggestedAction ??
+        'Verify COINDCX_API_KEY and COINDCX_API_SECRET are set correctly, and that the API key has the required permissions and is not IP-restricted.'
+    );
     this.name = 'CoinDCXAuthenticationError';
     Object.setPrototypeOf(this, CoinDCXAuthenticationError.prototype);
   }
 }
 
+function deriveValidationSuggestedAction(message: string): string {
+  const m = message.toLowerCase();
+  if (m.includes('leverage')) {
+    return 'Ensure the leverage value is within the allowed range (typically 1-100) for this pair.';
+  }
+  if (m.includes('quantity') || m.includes('min')) {
+    return 'Check min_quantity and min_notional for this pair using client.marketData.getMarketsDetails() or client.futures.market.getInstrumentDetails().';
+  }
+  return 'Check the request parameters against the API documentation.';
+}
+
 export class CoinDCXValidationError extends CoinDCXAPIError {
-  constructor(message: string, status: number, data: any, method: string, url: string) {
-    super(message, status, data, method, url);
+  constructor(message: string, status: number, data: any, method: string, url: string, suggestedAction?: string) {
+    super(message, status, data, method, url, undefined, suggestedAction ?? deriveValidationSuggestedAction(message));
     this.name = 'CoinDCXValidationError';
     Object.setPrototypeOf(this, CoinDCXValidationError.prototype);
   }
 }
 
 export class CoinDCXInsufficientMarginError extends CoinDCXAPIError {
-  constructor(message: string, status: number, data: any, method: string, url: string) {
-    super(message, status, data, method, url);
+  constructor(message: string, status: number, data: any, method: string, url: string, suggestedAction?: string) {
+    super(
+      message,
+      status,
+      data,
+      method,
+      url,
+      undefined,
+      suggestedAction ??
+        'Reduce the order quantity or leverage, or check available balance using client.spot.getBalances() or client.futures.account.getWallet().'
+    );
     this.name = 'CoinDCXInsufficientMarginError';
     Object.setPrototypeOf(this, CoinDCXInsufficientMarginError.prototype);
   }
 }
 
 export class CoinDCXInvalidPairError extends CoinDCXAPIError {
-  constructor(message: string, status: number, data: any, method: string, url: string) {
-    super(message, status, data, method, url);
+  constructor(message: string, status: number, data: any, method: string, url: string, suggestedAction?: string) {
+    super(
+      message,
+      status,
+      data,
+      method,
+      url,
+      undefined,
+      suggestedAction ??
+        'Fetch valid trading pairs using client.marketData.getMarketsDetails() or client.futures.market.getActiveInstruments() before placing orders.'
+    );
     this.name = 'CoinDCXInvalidPairError';
     Object.setPrototypeOf(this, CoinDCXInvalidPairError.prototype);
   }
 }
 
 export class CoinDCXOrderError extends CoinDCXAPIError {
-  constructor(message: string, status: number, data: any, method: string, url: string) {
-    super(message, status, data, method, url);
+  constructor(message: string, status: number, data: any, method: string, url: string, suggestedAction?: string) {
+    super(message, status, data, method, url, undefined, suggestedAction ?? deriveValidationSuggestedAction(message));
     this.name = 'CoinDCXOrderError';
     Object.setPrototypeOf(this, CoinDCXOrderError.prototype);
   }
@@ -94,8 +165,13 @@ export class CoinDCXWebSocketError extends CoinDCXError {
   public readonly originalError: Error | undefined;
   public readonly isRetryable: boolean;
 
-  constructor(message: string, originalError: Error | undefined = undefined, isRetryable = true) {
-    super(message);
+  constructor(
+    message: string,
+    originalError: Error | undefined = undefined,
+    isRetryable = true,
+    suggestedAction = 'Check network connectivity and WebSocket auth credentials. The client auto-reconnects when isRetryable is true.'
+  ) {
+    super(message, suggestedAction);
     this.name = 'CoinDCXWebSocketError';
     this.originalError = originalError;
     this.isRetryable = isRetryable;
@@ -104,8 +180,11 @@ export class CoinDCXWebSocketError extends CoinDCXError {
 }
 
 export class CoinDCXPaperEngineError extends CoinDCXError {
-  constructor(message: string) {
-    super(message);
+  constructor(
+    message: string,
+    suggestedAction = 'This occurred in the local paper-trading engine. Check simulated balances/positions via client.paper.getAccount().'
+  ) {
+    super(message, suggestedAction);
     this.name = 'CoinDCXPaperEngineError';
     Object.setPrototypeOf(this, CoinDCXPaperEngineError.prototype);
   }

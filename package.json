@@ -35,6 +35,10 @@
       ]
     }
   },
+  "bin": {
+    "coindcx-mcp": "./dist/bin/mcp.cjs",
+    "mcp": "./dist/bin/mcp.cjs"
+  },
   "files": [
     "dist",
     "README.md",
@@ -55,6 +59,7 @@
     "test:watch": "jest --watch",
     "check:types": "npx --yes @arethetypeswrong/cli@latest --pack .",
     "smoke": "tsx scripts/smoke-test.ts",
+    "mcp": "tsx bin/mcp.ts",
     "example:quickstart": "tsx examples/quickstart.ts",
     "example:paper": "tsx examples/paper-trading.ts",
     "example:ws": "tsx examples/ws-streams.ts",
@@ -93,6 +98,7 @@
     "url": "https://github.com/shubhamtaywade82/coindcx-sdk/issues"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4",
     "axios": "^1.6.0",
     "eventemitter3": "^5.0.1",
     "socket.io-client": "^4.7.2",
