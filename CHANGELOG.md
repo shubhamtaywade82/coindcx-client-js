@@ -5,6 +5,55 @@ All notable changes to this project are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.2.0] - 2026-08-24
+
+Closes the remaining gaps for driving this SDK from an autonomous agent with
+real API keys: a hard guardrail against oversized orders, a way to preview
+an order before it's sent, and host-level hints so an MCP client can gate
+risky calls behind confirmation.
+
+### Added
+
+- **Order-size guardrails** (`src/core/safety.ts`) - `client.setSafetyLimits({ maxOrderQuantity, maxOrderNotional })`
+  (also settable via the `safetyLimits` constructor option) rejects an
+  oversized order client-side, before it ever reaches the network, by
+  throwing the new `CoinDCXOrderLimitError`. Enforced in
+  `spot.createOrder`, `margin.createOrder`, and `futures.createOrder` (and
+  therefore in `ops.bracket.placeBracketOrder`, which calls the latter).
+  Unset by default - opt in via `client.getSafetyLimits()` /
+  `setSafetyLimits()`.
+- **`dry_run` on every MCP order-creation tool** (`futures_create_order`,
+  `spot_create_order`, `futures_place_bracket_order`, `paper_place_order`) -
+  validates the order (including the safety limits above) and returns what
+  would be submitted, without placing it.
+- **MCP tool annotations** (`readOnlyHint`, `destructiveHint`,
+  `idempotentHint`, `openWorldHint` per the
+  [MCP tools spec](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#annotations))
+  on every tool in the toolkit, so a compliant MCP host can gate
+  order-creation, position-closing, leverage-change, and paper-reset calls
+  behind user confirmation while read-only calls pass through freely.
+- **`account_get_safety_limits` MCP tool** - lets an agent introspect the
+  currently configured guardrails before sizing an order.
+- `COINDCX_MAX_ORDER_QUANTITY` / `COINDCX_MAX_ORDER_NOTIONAL` env vars for
+  `bin/mcp.ts`, wiring the guardrails above into the standalone MCP server.
+  The server logs a startup warning to stderr if neither is set.
+- `CoinDCXMcpServer.connect(transport)` - connects the server to any MCP
+  transport (not just stdio), so it can be exercised in-process against
+  `InMemoryTransport` in tests without spawning a subprocess.
+- Test coverage: `tests/safety-limits.test.ts` (guardrail unit + integration
+  tests, including proof that a blocked order never reaches the network)
+  and `tests/mcp-server.test.ts` (full MCP protocol round-trip over
+  `InMemoryTransport`: tool annotations, dry_run, guardrail rejection,
+  unknown-tool handling).
+
+### Changed
+
+- `FuturesApi`, `SpotApi`, and `MarginApi` constructors now accept the full
+  `RestClientOptions` (previously an ad-hoc inline type missing
+  `maxRetries`/`retryBaseDelayMs`/etc.), so all `RestClient` options -
+  including the new `safetyLimits` - can be passed when constructing these
+  classes directly, not just through `CoinDCXClient`.
+
 ## [1.1.0] - 2026-08-24
 
 ### Added

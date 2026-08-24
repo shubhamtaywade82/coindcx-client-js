@@ -1,4 +1,6 @@
 import { RestClient } from '../core/rest-client';
+import { RestClientOptions } from '../core/types';
+import { assertWithinOrderLimits } from '../core/safety';
 import {
   CreateFuturesOrderRequest,
   ListFuturesOrdersRequest,
@@ -32,11 +34,12 @@ import {
 } from '../models';
 
 export class FuturesApi extends RestClient {
-  constructor(options?: { apiKey?: string; apiSecret?: string; baseUrl?: string; paperMode?: boolean; paperEngineHandler?: (config: any) => Promise<any> }) {
+  constructor(options?: RestClientOptions) {
     super(options);
   }
 
   async createOrder(params: CreateFuturesOrderRequest): Promise<FuturesOrderResponse> {
+    assertWithinOrderLimits({ quantity: params.target_quantity, price: params.price }, this.safetyLimits);
     if (!params.client_order_id) {
       params.client_order_id = `js_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     }

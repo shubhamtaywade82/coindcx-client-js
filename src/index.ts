@@ -10,6 +10,7 @@ import { BracketOps } from './ops/bracket';
 import { SnapshotOps } from './ops/snapshot';
 import { PaperTradingEngine } from './paper/engine';
 import { CoinDCXSDKOptions } from './core/types';
+import { TradingSafetyLimits } from './core/safety';
 
 export { CoinDCXSDKOptions } from './core/types';
 
@@ -58,6 +59,7 @@ export class CoinDCXClient {
       retryBaseDelayMs: options.retryBaseDelayMs,
       retryMaxDelayMs: options.retryMaxDelayMs,
       retryFactor: options.retryFactor,
+      safetyLimits: options.safetyLimits,
     };
 
     this.spot = new SpotApi(restOptions);
@@ -147,6 +149,22 @@ export class CoinDCXClient {
     this.futures.trading.setPaperMode(enabled, handler);
   }
 
+  /**
+   * Sets client-side order-size guardrails (see `TradingSafetyLimits`),
+   * enforced before any order-create request reaches the network. Applies
+   * across spot, margin, and futures order creation. Pass `undefined` to
+   * clear the limits.
+   */
+  setSafetyLimits(limits: TradingSafetyLimits | undefined): void {
+    this.spot.setSafetyLimits(limits);
+    this.margin.setSafetyLimits(limits);
+    this.futures.trading.setSafetyLimits(limits);
+  }
+
+  getSafetyLimits(): TradingSafetyLimits | undefined {
+    return this.futures.trading.getSafetyLimits();
+  }
+
   getRateLimitStatus(): Record<string, number> {
     return this.futures.trading.getRateLimitStatus();
   }
@@ -198,6 +216,7 @@ export class CoinDCXClient {
 export * from './core/types';
 export * from './core/errors';
 export * from './core/rate-limiter';
+export * from './core/safety';
 export {
   OrderSideSchema,
   OrderTypeSchema,

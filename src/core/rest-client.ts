@@ -2,6 +2,7 @@ import axios, { AxiosInstance, AxiosRequestConfig, InternalAxiosRequestConfig, A
 import crypto from 'crypto';
 import { TokenBucket, coinDcxRateLimits } from './rate-limiter';
 import { RestClientOptions } from './types';
+import { TradingSafetyLimits } from './safety';
 import {
   CoinDCXAPIError,
   CoinDCXNetworkError,
@@ -35,6 +36,7 @@ export class RestClient {
   protected retryBaseDelayMs: number;
   protected retryMaxDelayMs: number;
   protected retryFactor: number;
+  protected safetyLimits: TradingSafetyLimits | undefined;
 
   constructor(options: RestClientOptions = {}) {
     this.apiKey = options.apiKey ?? undefined;
@@ -45,6 +47,7 @@ export class RestClient {
     this.retryBaseDelayMs = options.retryBaseDelayMs ?? 1000;
     this.retryMaxDelayMs = options.retryMaxDelayMs ?? 30_000;
     this.retryFactor = options.retryFactor ?? 2;
+    this.safetyLimits = options.safetyLimits;
 
     this.axiosInstance = axios.create({
       baseURL: options.baseUrl || 'https://api.coindcx.com',
@@ -275,6 +278,14 @@ export class RestClient {
   setPaperMode(enabled: boolean, handler?: (config: InternalAxiosRequestConfig) => Promise<any>): void {
     this.paperMode = enabled;
     if (handler) this.paperEngineHandler = handler;
+  }
+
+  setSafetyLimits(limits: TradingSafetyLimits | undefined): void {
+    this.safetyLimits = limits;
+  }
+
+  getSafetyLimits(): TradingSafetyLimits | undefined {
+    return this.safetyLimits;
   }
 
   getRateLimitStatus(): Record<string, number> {

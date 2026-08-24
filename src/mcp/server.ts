@@ -1,5 +1,6 @@
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
+import { Transport } from '@modelcontextprotocol/sdk/shared/transport.js';
 import { CallToolRequestSchema, ListToolsRequestSchema, Tool } from '@modelcontextprotocol/sdk/types.js';
 import { CoinDCXClient } from '../index';
 import { createAllToolkits, MCPTool } from './toolkit';
@@ -28,6 +29,7 @@ export class CoinDCXMcpServer {
           name: t.name,
           description: t.description,
           inputSchema: t.inputSchema,
+          annotations: t.annotations,
         })),
       };
     });
@@ -59,9 +61,13 @@ export class CoinDCXMcpServer {
     });
   }
 
-  async start(): Promise<void> {
-    const transport = new StdioServerTransport();
+  /** Connects this server to any MCP transport (stdio, in-memory for tests, etc.). */
+  async connect(transport: Transport): Promise<void> {
     await this.server.connect(transport);
+  }
+
+  async start(): Promise<void> {
+    await this.connect(new StdioServerTransport());
     // stdout is reserved for the JSON-RPC transport; status goes to stderr.
     console.error('CoinDCX MCP server running on stdio');
   }

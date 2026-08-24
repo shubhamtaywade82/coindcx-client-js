@@ -116,7 +116,9 @@ Add it to your MCP host config:
       "env": {
         "COINDCX_API_KEY": "your_key",
         "COINDCX_API_SECRET": "your_secret",
-        "COINDCX_PAPER_MODE": "true"
+        "COINDCX_PAPER_MODE": "true",
+        "COINDCX_MAX_ORDER_QUANTITY": "10",
+        "COINDCX_MAX_ORDER_NOTIONAL": "500"
       }
     }
   }
@@ -128,6 +130,22 @@ tool calls through the local paper engine instead of live trading. Run it direct
 `npm run mcp` in this repo, or `coindcx-mcp` once installed globally. Tool errors are returned with
 the underlying `CoinDCXError`'s `suggestedAction` appended, so an agent can self-correct (e.g. fetch
 balances and resize an order after an insufficient-margin error) without human intervention.
+
+**Guardrails for autonomous/agent use:**
+
+- `COINDCX_MAX_ORDER_QUANTITY` / `COINDCX_MAX_ORDER_NOTIONAL` cap the size of any order the server
+  will forward to the exchange (see [Order-size guardrails](#order-size-guardrails) below). If
+  neither is set, the server logs a startup warning to stderr and imposes no limit — set at least
+  one before pointing an autonomous agent at a live account. `account_get_safety_limits` lets the
+  agent introspect the active limits at any time.
+- Every order-creation tool (`futures_create_order`, `spot_create_order`,
+  `futures_place_bracket_order`, `paper_place_order`) accepts a `dry_run: true` argument that
+  validates the order — including the guardrails above — and returns what would be submitted,
+  without placing it.
+- Every tool is annotated per the [MCP tool annotations spec](https://modelcontextprotocol.io/specification/2025-06-18/server/tools#annotations)
+  (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`), so a compliant MCP host
+  can gate order-creation, position-closing, leverage-change, and paper-reset calls behind
+  confirmation while letting read-only calls through freely.
 
 ## Pair format
 
@@ -150,14 +168,36 @@ CoinDCXClient.calculateLiquidationPrice(60000, 10, 'buy'); // approximate liq pr
   request never reached the exchange) or surfaces a duplicate-id error — it never double-submits
   the order. Any other write path still fails fast. Tune with `maxRetries`, `retryBaseDelayMs`,
   `retryMaxDelayMs`, `retryFactor` or `client.configureRetry(...)`.
+- **Order-size guardrails** — see [Order-size guardrails](#order-size-guardrails) below.
 - **Errors** — typed hierarchy: `CoinDCXError` → `CoinDCXAPIError`,
   `CoinDCXNetworkError`, `CoinDCXRateLimitError`, `CoinDCXAuthenticationError`,
   `CoinDCXValidationError`, `CoinDCXInsufficientMarginError`, `CoinDCXInvalidPairError`,
-  `CoinDCXOrderError`, `CoinDCXWebSocketError`. Every error carries a `suggestedAction` string
+  `CoinDCXOrderError`, `CoinDCXOrderLimitError`, `CoinDCXWebSocketError`. Every error carries a `suggestedAction` string
   hinting how to recover (e.g. which endpoint to call to check balance or valid pairs) — useful
   for agent/LLM callers driving the SDK autonomously. Guards: `isRetryableError`, `isRateLimitError`,
   `isAuthenticationError`, `isInsufficientMarginError`.
 - **WebSocket** — auto-reconnect with exponential backoff + jitter.
+
+### Order-size guardrails
+
+Optional, client-side, enforced before any order-create request reaches the network:
+
+```typescript
+const client = new CoinDCXClient({
+  apiKey, apiSecret,
+  safetyLimits: { maxOrderQuantity: 10, maxOrderNotional: 5000 },
+});
+// or at any time:
+client.setSafetyLimits({ maxOrderQuantity: 10 });
+client.getSafetyLimits(); // introspect current limits
+```
+
+Applies to `client.spot.createOrder`, `client.margin.createOrder`, `client.futures.trading.createOrder`
+(and therefore `client.ops.bracket.placeBracketOrder`, which calls it). An oversized order throws
+`CoinDCXOrderLimitError` — a subclass of `CoinDCXError`, never retried — instead of ever being sent.
+Unset by default (no limit); recommended for any agent/LLM-driven deployment — see the
+[MCP server](#mcp-server-stdio) section above, which wires this up via
+`COINDCX_MAX_ORDER_QUANTITY` / `COINDCX_MAX_ORDER_NOTIONAL`.
 
 ## Development
 

@@ -1,6 +1,7 @@
 export * from './types';
 export * from './errors';
 export * from './rate-limiter';
+export * from './safety';
 export {
   // Zod schemas
   OrderSideSchema,
