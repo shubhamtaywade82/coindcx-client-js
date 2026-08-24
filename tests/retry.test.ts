@@ -35,12 +35,53 @@ describe('retry with exponential backoff', () => {
     expect(nock.pendingMocks()).toHaveLength(0);
   });
 
-  it('fails fast on a retryable POST (never double-submits)', async () => {
+  it('fails fast on a retryable POST with no client_order_id (never double-submits)', async () => {
+    const api = client({ maxRetries: 2, retryBaseDelayMs: 5 });
+    nock(API)
+      .post('/exchange/v1/derivatives/futures/orders/cancel_all')
+      .query(true)
+      .reply(500, { message: 'server error' });
+
+    await expect(
+      api.cancelAllOrders({ side: 'buy' } as any)
+    ).rejects.toBeInstanceOf(CoinDCXAPIError);
+    expect(nock.pendingMocks()).toHaveLength(0);
+  });
+
+  it('retries a retryable POST that carries a client_order_id until success', async () => {
     const api = client({ maxRetries: 2, retryBaseDelayMs: 5 });
     nock(API)
       .post('/exchange/v1/derivatives/futures/orders/create')
       .query(true)
-      .reply(500, { message: 'server error' });
+      .reply(500, { message: 'server error' })
+      .post('/exchange/v1/derivatives/futures/orders/create')
+      .query(true)
+      .reply(200, { id: 'order-1', status: 'open' });
+
+    const result = await api.createOrder({
+      side: 'buy',
+      order_type: 'market_order',
+      base_currency: 'SOL',
+      quote_currency: 'USDT',
+      target_quantity: 1,
+      price: 0,
+      leverage: 1,
+      client_order_id: 'fixed-client-order-id',
+      time_in_force: 'gtc',
+      stop_loss: 0,
+      take_profit: 0,
+      margin_type: 'isolated',
+    });
+    expect(result).toEqual({ id: 'order-1', status: 'open' });
+    expect(nock.pendingMocks()).toHaveLength(0);
+  });
+
+  it('does not loop on a duplicate client_order_id rejection (non-retryable 400)', async () => {
+    const api = client({ maxRetries: 2, retryBaseDelayMs: 5 });
+    nock(API)
+      .post('/exchange/v1/derivatives/futures/orders/create')
+      .query(true)
+      .reply(400, { message: 'client_order_id already exists' });
 
     await expect(
       api.createOrder({
@@ -51,7 +92,7 @@ describe('retry with exponential backoff', () => {
         target_quantity: 1,
         price: 0,
         leverage: 1,
-        client_order_id: '',
+        client_order_id: 'reused-client-order-id',
         time_in_force: 'gtc',
         stop_loss: 0,
         take_profit: 0,

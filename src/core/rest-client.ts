@@ -154,7 +154,7 @@ export class RestClient {
     endpoint: string,
     data: Record<string, any> = {}
   ): Promise<T> {
-    return this.runWithRetry(method, async () => {
+    return this.runWithRetry(method, data, async () => {
       const paperHandled = this.paperMode && this.paperEngineHandler && isPaperHandledEndpoint(endpoint);
       if (!paperHandled && (!this.apiKey || !this.apiSecret)) {
         throw new Error('API Key and Secret required for signed requests');
@@ -199,7 +199,7 @@ export class RestClient {
     data: Record<string, any> = {},
     usePublicBase: boolean = false
   ): Promise<T> {
-    return this.runWithRetry(method, async () => {
+    return this.runWithRetry(method, data, async () => {
       const config: AxiosRequestConfig = {
         method,
         url: endpoint,
@@ -222,12 +222,17 @@ export class RestClient {
   }
 
   /**
-   * Re-runs an idempotent request with exponential backoff on retryable errors.
-   * Only GET is retried: re-sending a signed POST could double-submit an order,
-   * so write paths always fail fast and surface the original error.
+   * Re-runs a request with exponential backoff on retryable errors.
+   * GET is always safe to retry. A POST/DELETE carrying a `client_order_id`
+   * is also retried: CoinDCX rejects a reused `client_order_id` instead of
+   * executing it again (see docs.coindcx.com), so a retry either succeeds
+   * (the original request never reached the exchange) or surfaces a
+   * duplicate-id validation error - it never double-submits the order.
+   * Any other write path fails fast and surfaces the original error.
    */
-  private async runWithRetry<T>(method: string, run: () => Promise<T>): Promise<T> {
-    const maxRetries = method === 'GET' ? this.maxRetries : 0;
+  private async runWithRetry<T>(method: string, params: Record<string, any> | undefined, run: () => Promise<T>): Promise<T> {
+    const isIdempotentWrite = (method === 'POST' || method === 'DELETE') && Boolean(params?.client_order_id);
+    const maxRetries = method === 'GET' || isIdempotentWrite ? this.maxRetries : 0;
     let attempt = 0;
     for (;;) {
       try {

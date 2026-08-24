@@ -101,6 +101,34 @@ const tools = createAllToolkits(client);
 const openaiTools = toToolList(tools, 'openai'); // or 'anthropic' | 'mcp'
 ```
 
+### MCP server (stdio)
+
+The package also ships a ready-to-run [MCP](https://modelcontextprotocol.io) server binary that
+exposes the full toolkit (`createAllToolkits`) over stdio, for hosts like Claude Desktop or Cursor.
+Add it to your MCP host config:
+
+```json
+{
+  "mcpServers": {
+    "coindcx": {
+      "command": "npx",
+      "args": ["-y", "@nemesis-oss/coindcx-sdk", "mcp"],
+      "env": {
+        "COINDCX_API_KEY": "your_key",
+        "COINDCX_API_SECRET": "your_secret",
+        "COINDCX_PAPER_MODE": "true"
+      }
+    }
+  }
+}
+```
+
+`COINDCX_API_KEY` / `COINDCX_API_SECRET` are required; `COINDCX_PAPER_MODE=true` routes order/position
+tool calls through the local paper engine instead of live trading. Run it directly with
+`npm run mcp` in this repo, or `coindcx-mcp` once installed globally. Tool errors are returned with
+the underlying `CoinDCXError`'s `suggestedAction` appended, so an agent can self-correct (e.g. fetch
+balances and resize an order after an insufficient-margin error) without human intervention.
+
 ## Pair format
 
 CoinDCX uses exchange-prefixed pairs: `B-BTC_USDT` (futures), `BTC_USDT` (spot market).
@@ -116,13 +144,18 @@ CoinDCXClient.calculateLiquidationPrice(60000, 10, 'buy'); // approximate liq pr
 
 - **Rate limiting** — per-endpoint token buckets prevent IP bans; status via `client.getRateLimitStatus()`.
 - **Retries** — idempotent GETs retry on 429/5xx/network errors with exponential backoff
-  (`retry-after` honored, capped). Writes (POST/DELETE) are **never retried automatically**,
-  so a timed-out order can't be double-submitted. Tune with `maxRetries`, `retryBaseDelayMs`,
+  (`retry-after` honored, capped). A POST/DELETE also retries **only** when it carries a
+  `client_order_id` (auto-generated for every order-create call): CoinDCX rejects a reused
+  `client_order_id` instead of executing it twice, so the retry either succeeds (the original
+  request never reached the exchange) or surfaces a duplicate-id error — it never double-submits
+  the order. Any other write path still fails fast. Tune with `maxRetries`, `retryBaseDelayMs`,
   `retryMaxDelayMs`, `retryFactor` or `client.configureRetry(...)`.
 - **Errors** — typed hierarchy: `CoinDCXError` → `CoinDCXAPIError`,
   `CoinDCXNetworkError`, `CoinDCXRateLimitError`, `CoinDCXAuthenticationError`,
   `CoinDCXValidationError`, `CoinDCXInsufficientMarginError`, `CoinDCXInvalidPairError`,
-  `CoinDCXOrderError`, `CoinDCXWebSocketError`. Guards: `isRetryableError`, `isRateLimitError`,
+  `CoinDCXOrderError`, `CoinDCXWebSocketError`. Every error carries a `suggestedAction` string
+  hinting how to recover (e.g. which endpoint to call to check balance or valid pairs) — useful
+  for agent/LLM callers driving the SDK autonomously. Guards: `isRetryableError`, `isRateLimitError`,
   `isAuthenticationError`, `isInsufficientMarginError`.
 - **WebSocket** — auto-reconnect with exponential backoff + jitter.
 
@@ -141,6 +174,7 @@ npm run check:types # @arethetypeswrong: validates published exports
 
 - `@nemesis-oss/coindcx-sdk` — full SDK (REST, WS, ops, paper engine)
 - `@nemesis-oss/coindcx-sdk/mcp` — toolkits + format converters only
+- `coindcx-mcp` / `npx @nemesis-oss/coindcx-sdk mcp` — standalone MCP stdio server binary
 
 ## License
 
