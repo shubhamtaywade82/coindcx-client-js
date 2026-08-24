@@ -161,6 +161,19 @@ export class CoinDCXOrderError extends CoinDCXAPIError {
   }
 }
 
+/**
+ * Thrown client-side, before any network request, when an order would
+ * violate a configured `TradingSafetyLimits` guardrail (see core/safety.ts).
+ * Never retryable - the caller must resize the order.
+ */
+export class CoinDCXOrderLimitError extends CoinDCXError {
+  constructor(message: string, suggestedAction: string) {
+    super(message, suggestedAction);
+    this.name = 'CoinDCXOrderLimitError';
+    Object.setPrototypeOf(this, CoinDCXOrderLimitError.prototype);
+  }
+}
+
 export class CoinDCXWebSocketError extends CoinDCXError {
   public readonly originalError: Error | undefined;
   public readonly isRetryable: boolean;

@@ -1,3 +1,5 @@
+import { TradingSafetyLimits } from './safety';
+
 export enum OrderSide {
   BUY = 'buy',
   SELL = 'sell',
@@ -92,6 +94,12 @@ export interface CoinDCXClientOptions {
   rateLimitWindow?: number;
   maxRequestsPerWindow?: number;
   binanceClient?: any;
+  /**
+   * Client-side order-size guardrails, enforced before any order-create
+   * request reaches the network. Unset by default (no limit) - recommended
+   * for any agent/LLM-driven deployment. See `TradingSafetyLimits`.
+   */
+  safetyLimits?: TradingSafetyLimits;
 }
 
 export type CoinDCXSDKOptions = CoinDCXClientOptions;
@@ -107,6 +115,7 @@ export interface RestClientOptions {
   retryBaseDelayMs?: number;
   retryMaxDelayMs?: number;
   retryFactor?: number;
+  safetyLimits?: TradingSafetyLimits;
 }
 
 export interface WsClientOptions {

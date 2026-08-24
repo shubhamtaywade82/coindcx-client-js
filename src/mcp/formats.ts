@@ -32,11 +32,13 @@ export function toMCPTool(tool: MCPTool): {
   name: string;
   description: string;
   inputSchema: Record<string, unknown>;
+  annotations?: MCPTool['annotations'];
 } {
   return {
     name: tool.name,
     description: tool.description,
     inputSchema: toJsonSchema(tool.inputSchema),
+    ...(tool.annotations ? { annotations: tool.annotations } : {}),
   };
 }
 

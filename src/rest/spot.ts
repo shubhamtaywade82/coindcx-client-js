@@ -1,4 +1,6 @@
 import { RestClient } from '../core/rest-client';
+import { RestClientOptions } from '../core/types';
+import { assertWithinOrderLimits } from '../core/safety';
 import {
   CreateSpotOrderRequest,
   CreateMultipleSpotOrdersRequest,
@@ -15,11 +17,12 @@ import {
 } from '../models';
 
 export class SpotApi extends RestClient {
-  constructor(options?: { apiKey?: string; apiSecret?: string; baseUrl?: string; paperMode?: boolean; paperEngineHandler?: (config: any) => Promise<any> }) {
+  constructor(options?: RestClientOptions) {
     super(options);
   }
 
   async createOrder(params: CreateSpotOrderRequest): Promise<SpotOrderResponse> {
+    assertWithinOrderLimits({ quantity: params.quantity, price: params.price }, this.safetyLimits);
     if (!params.client_order_id) {
       params.client_order_id = `js_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
     }
@@ -28,6 +31,7 @@ export class SpotApi extends RestClient {
 
   async createMultipleOrders(params: CreateMultipleSpotOrdersRequest): Promise<SpotOrderResponse[]> {
     params.orders.forEach(o => {
+      assertWithinOrderLimits({ quantity: o.quantity, price: o.price }, this.safetyLimits);
       if (!o.client_order_id) {
         o.client_order_id = `js_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`;
       }
